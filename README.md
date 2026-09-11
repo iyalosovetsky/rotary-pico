@@ -32,19 +32,24 @@ Commands are sent one per line over the console (REPL):
 | Command | Description |
 |---|---|
 | `X SPEED <steps_per_sec>` | Table rotation speed (sign sets direction, 0 = stopped) |
-| `X START` | Start table rotation |
+| `X START [CW\|CCW]` | Start table rotation - direction optional, defaults to CW (or last-used) |
 | `X STOP` | Stop table rotation |
 | `Y MIN <steps>` | Lower limit of carriage travel (microsteps) |
 | `Y MAX <steps>` | Upper limit of carriage travel (microsteps) |
 | `Y SPEED <steps_per_sec>` | Carriage speed |
 | `Y START` | Start cyclic motion between `MIN` and `MAX` |
 | `Y STOP` | Stop the carriage |
-| `S MIN <deg>` | Minimum scanner tilt angle (degrees) |
-| `S MAX <deg>` | Maximum scanner tilt angle (degrees) |
-| `S SPEED <raw_units>` | Servo speed (raw register units, tune empirically) |
-| `S START` | Start cyclic tilt between `MIN` and `MAX` |
-| `S STOP` | Stop the servo |
-| `STATUS` | Current state of all three axes |
+| `Z MIN <steps>` | Lower limit of Z travel (microsteps) |
+| `Z MAX <steps>` | Upper limit of Z travel (microsteps) |
+| `Z SPEED <steps_per_sec>` | Z axis speed |
+| `Z START` | Start cyclic motion between `MIN` and `MAX` |
+| `Z STOP` | Stop the Z axis |
+| `A MIN <deg>` | Minimum scanner tilt angle (degrees) |
+| `A MAX <deg>` | Maximum scanner tilt angle (degrees) |
+| `A SPEED <raw_units>` | Servo speed (raw register units, tune empirically) |
+| `A START` | Start cyclic tilt between `MIN` and `MAX` |
+| `A STOP` | Stop the servo |
+| `STATUS` | Current state of all four axes |
 | `HELP` | Command help |
 
 Example session:
@@ -56,10 +61,14 @@ Y MIN 0
 Y MAX 3200
 Y SPEED 400
 Y START
-S MIN 30
-S MAX 150
-S SPEED 300
-S START
+Z MIN 0
+Z MAX 3200
+Z SPEED 400
+Z START
+A MIN 30
+A MAX 150
+A SPEED 300
+A START
 STATUS
 ```
 
