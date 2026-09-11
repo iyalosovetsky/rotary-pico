@@ -1,14 +1,19 @@
 """Standalone ST3215 ping test - run directly on the SKR Pico
 (Thonny "Run", or `import ping_test` from the REPL).
+
+Status output matches the official Waveshare STServo_Python/ping.py demo.
 """
-from st3215 import ServoBus, ST3215
+from st3215 import ServoBus, ST3215, COMM_SUCCESS, get_result_text, get_error_text
+
+SCS_ID = 1
 
 bus = ServoBus(uart_id=0, tx=0, rx=1, baudrate=1000000)
-servo = ST3215(bus, servo_id=1)
+servo = ST3215(bus, SCS_ID)
 
-if servo.ping():
-    print("ping OK")
-    pos = servo.read_position()
-    print("position: %d (%.1f deg)" % (pos, pos * 360 / 4096))
+model, result, error = servo.ping_verbose()
+if result != COMM_SUCCESS:
+    print(get_result_text(result))
 else:
-    print("ping FAILED - no response (check wiring/jumper/power)")
+    print("[ID:%03d] ping Succeeded. SC Servo model number : %d" % (SCS_ID, model))
+if error != 0:
+    print(get_error_text(error))

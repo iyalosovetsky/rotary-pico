@@ -26,6 +26,46 @@ INST_PING = 1
 INST_READ = 2
 INST_WRITE = 3
 
+# Comm-result and error-bit codes, and their messages, match the official
+# Waveshare/Feetech scservo_sdk (protocol_packet_handler.py) so status
+# reports here read the same way as the vendored STServo_Python demos.
+COMM_SUCCESS = 0
+COMM_RX_TIMEOUT = -6
+COMM_RX_CORRUPT = -7
+
+ERRBIT_VOLTAGE = 1
+ERRBIT_ANGLE = 2
+ERRBIT_OVERHEAT = 4
+ERRBIT_OVERELE = 8
+ERRBIT_OVERLOAD = 32
+
+
+def get_result_text(result):
+    if result == COMM_SUCCESS:
+        return "[TxRxResult] Communication success!"
+    if result == COMM_RX_TIMEOUT:
+        return "[TxRxResult] There is no status packet!"
+    if result == COMM_RX_CORRUPT:
+        return "[TxRxResult] Incorrect status packet!"
+    return "[TxRxResult] Unknown result %d" % result
+
+
+def get_error_text(error):
+    msgs = []
+    if error & ERRBIT_VOLTAGE:
+        msgs.append("Input voltage error!")
+    if error & ERRBIT_ANGLE:
+        msgs.append("Angle sen error!")
+    if error & ERRBIT_OVERHEAT:
+        msgs.append("Overheat error!")
+    if error & ERRBIT_OVERELE:
+        msgs.append("OverEle error!")
+    if error & ERRBIT_OVERLOAD:
+        msgs.append("Overload error!")
+    return "[ServoStatus] " + " ".join(msgs) if msgs else ""
+
+
+ADDR_MODEL_L = 3
 ADDR_MIN_ANGLE_LIMIT_L = 9
 ADDR_MAX_ANGLE_LIMIT_L = 11
 ADDR_MODE = 33
@@ -54,6 +94,8 @@ class ServoBus:
                           timeout=20, timeout_char=5)
 
     def _txrx(self, servo_id, instruction, params, reply_len):
+        """Low-level transaction. Returns (reply_bytes, comm_result, error_byte),
+        mirroring the official SDK's (data, comm_result, error) shape."""
         length = len(params) + 2
         pkt = bytearray()
         pkt += HEADER
@@ -65,8 +107,17 @@ class ServoBus:
         pkt.append((~checksum) & 0xFF)
         self.uart.write(pkt)
         if reply_len == 0:
-            return b""
-        return self._read_exact(reply_len)
+            return b"", COMM_SUCCESS, 0
+
+        reply = self._read_exact(reply_len)
+        if len(reply) < reply_len:
+            return reply, COMM_RX_TIMEOUT, 0
+        if reply[0] != 0xFF or reply[1] != 0xFF or reply[2] != servo_id:
+            return reply, COMM_RX_CORRUPT, 0
+        checksum = (~sum(reply[2:-1])) & 0xFF
+        if reply[-1] != checksum:
+            return reply, COMM_RX_CORRUPT, 0
+        return reply, COMM_SUCCESS, reply[4]
 
     def _read_exact(self, n, budget_ms=50):
         buf = bytearray()
@@ -79,20 +130,42 @@ class ServoBus:
                 time.sleep_ms(1)
         return buf
 
-    def write(self, servo_id, addr, data):
+    # -- verbose, status-returning API (mirrors the official scservo_sdk) --
+
+    def ping_status(self, servo_id):
+        """Returns (comm_result, error_byte)."""
+        _, result, error = self._txrx(servo_id, INST_PING, b"", reply_len=6)
+        return result, error
+
+    def read_status(self, servo_id, addr, length):
+        """Returns (data_bytes_or_None, comm_result, error_byte)."""
+        params = bytes([addr, length])
+        reply, result, error = self._txrx(servo_id, INST_READ, params, reply_len=6 + length)
+        data = bytes(reply[5:5 + length]) if result == COMM_SUCCESS else None
+        return data, result, error
+
+    def write_status(self, servo_id, addr, data):
+        """Returns (comm_result, error_byte)."""
         params = bytes([addr]) + bytes(data)
-        self._txrx(servo_id, INST_WRITE, params, reply_len=6)
+        _, result, error = self._txrx(servo_id, INST_WRITE, params, reply_len=6)
+        return result, error
+
+    # -- simple API used by ST3215/scanner_rig.py: bool / raise on failure --
+
+    def write(self, servo_id, addr, data):
+        result, error = self.write_status(servo_id, addr, data)
+        if result != COMM_SUCCESS:
+            raise OSError("servo %d: %s" % (servo_id, get_result_text(result)))
 
     def read(self, servo_id, addr, length):
-        params = bytes([addr, length])
-        reply = self._txrx(servo_id, INST_READ, params, reply_len=6 + length)
-        if len(reply) < 6 + length:
-            raise OSError("servo %d: no reply reading addr %d (check wiring/id)" % (servo_id, addr))
-        return reply[5:5 + length]
+        data, result, error = self.read_status(servo_id, addr, length)
+        if result != COMM_SUCCESS:
+            raise OSError("servo %d: %s" % (servo_id, get_result_text(result)))
+        return data
 
     def ping(self, servo_id):
-        reply = self._txrx(servo_id, INST_PING, b"", reply_len=6)
-        return len(reply) == 6 and reply[0] == 0xFF and reply[1] == 0xFF and reply[2] == servo_id
+        result, error = self.ping_status(servo_id)
+        return result == COMM_SUCCESS
 
 
 class ST3215:
@@ -102,6 +175,33 @@ class ST3215:
 
     def ping(self):
         return self.bus.ping(self.id)
+
+    def ping_verbose(self):
+        """Like the official demo's ping(): pings, then reads the model
+        number register. Returns (model_number_or_None, comm_result, error)."""
+        result, error = self.bus.ping_status(self.id)
+        if result != COMM_SUCCESS:
+            return None, result, error
+        data, result, error = self.bus.read_status(self.id, ADDR_MODEL_L, 2)
+        model = (data[0] | (data[1] << 8)) if data else None
+        return model, result, error
+
+    def set_goal_verbose(self, position_units, speed=0):
+        """Same as set_goal(), but returns (comm_result, error) instead of
+        raising on failure."""
+        data = [
+            position_units & 0xFF, (position_units >> 8) & 0xFF,
+            0, 0,
+            speed & 0xFF, (speed >> 8) & 0xFF,
+        ]
+        return self.bus.write_status(self.id, ADDR_GOAL_POSITION_L, data)
+
+    def read_position_verbose(self):
+        """Same as read_position(), but returns (position_or_None, comm_result,
+        error) instead of raising on failure."""
+        data, result, error = self.bus.read_status(self.id, ADDR_PRESENT_POSITION_L, 2)
+        pos = (data[0] | (data[1] << 8)) if data else None
+        return pos, result, error
 
     def torque_enable(self, enabled=True):
         self.bus.write(self.id, ADDR_TORQUE_ENABLE, [1 if enabled else 0])
