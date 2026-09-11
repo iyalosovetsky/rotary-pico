@@ -1,0 +1,5 @@
+# FreeCAD
+*.FCBak
+*.FCStd1
+*.FCStd2
+.~lock.*
