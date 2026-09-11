@@ -8,6 +8,11 @@ Raptor-style 3D scanner rig.
 
 Console commands (G-code-like, one per line):
 
+    START [minutes]             start ALL axes at once, auto-stop after
+                                 [minutes] (default 5) using each axis's
+                                 already-configured SPEED/MIN/MAX/etc
+    STOP                        stop all axes immediately
+
     X SPEED <steps_per_sec>     signed: sign sets direction, 0 = stopped
     X START [CW|CCW]           direction optional, defaults to CW (or last-used)
     X STOP
@@ -70,6 +75,8 @@ servo = ST3215(servo_bus, servo_id=1)
 X_CURRENT_MA = 500
 Y_CURRENT_MA = 500
 Z_CURRENT_MA = 500
+
+CYCLE_DEFAULT_MINUTES = 5
 
 state = {
     "x": {"running": False, "speed": 200},
@@ -239,6 +246,33 @@ def print_status():
           (a["running"], a["speed"], a["min_deg"], a["max_deg"]))
 
 
+_cycle_task = None
+
+
+async def _cycle_timer(duration_s):
+    await asyncio.sleep(duration_s)
+    stop_all()
+    print("cycle finished after %.4g min - all axes stopped" % (duration_s / 60))
+
+
+def start_all(duration_minutes=None):
+    global _cycle_task
+    if duration_minutes is None:
+        duration_minutes = CYCLE_DEFAULT_MINUTES
+    for key in ("x", "y", "z", "a"):
+        state[key]["running"] = True
+    if _cycle_task is not None:
+        _cycle_task.cancel()
+    _cycle_task = asyncio.create_task(_cycle_timer(duration_minutes * 60))
+    print("ok START - all axes running, cycle length %.4g min" % duration_minutes)
+
+
+def stop_all():
+    for key in ("x", "y", "z", "a"):
+        state[key]["running"] = False
+    print("ok STOP - all axes stopped")
+
+
 def handle_command(line):
     parts = line.strip().split()
     if not parts:
@@ -250,6 +284,17 @@ def handle_command(line):
         return
     if cmd == "HELP":
         print(__doc__)
+        return
+    if cmd == "START":
+        try:
+            duration = float(parts[1]) if len(parts) >= 2 else None
+        except ValueError:
+            print("? bad duration (minutes):", line)
+            return
+        start_all(duration)
+        return
+    if cmd == "STOP":
+        stop_all()
         return
 
     if cmd not in ("X", "Y", "Z", "A") or len(parts) < 2:
