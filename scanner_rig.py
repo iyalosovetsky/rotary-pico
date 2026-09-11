@@ -15,14 +15,24 @@ Console commands (G-code-like, one per line):
     Y MIN <steps>
     Y MAX <steps>
     Y SPEED <steps_per_sec>     unsigned
+    Y SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Y START
     Y STOP
 
     Z MIN <steps>
     Z MAX <steps>
     Z SPEED <steps_per_sec>     unsigned
+    Z SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Z START
     Z STOP
+
+Y and Z have no physical endstops - hitting the mechanical limit is
+detected via the TMC2209's StallGuard (rising motor load stalls it,
+SG_RESULT drops). When that happens mid-move, MIN/MAX auto-clamps to
+the real position it stalled at and the axis reverses, instead of
+grinding against the stop. SGTHRS (0-255, higher trips more easily)
+needs tuning by hand for your actual mechanics/speed - there's no
+universal default.
 
     A MIN <deg>
     A MAX <deg>
@@ -63,17 +73,22 @@ Z_CURRENT_MA = 500
 
 state = {
     "x": {"running": False, "speed": 200},
-    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1},
-    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1},
+    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 10},
+    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 10},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
 
-# ---- persisted MIN/MAX/SPEED, saved to/loaded from a file at the board root ----
+STALL_CHECK_EVERY_N_STEPS = 10  # StallGuard is read over UART - too slow to check every step
+STALL_SETTLE_STEPS = 40  # SG_RESULT reads ~0 (not "stalled", just not-yet-valid) for a
+                          # couple dozen steps after starting from a stop - skip checking
+                          # until it's had time to settle, or every reversal false-trips
+
+# ---- persisted MIN/MAX/SPEED/SGTHRS, saved to/loaded from a file at the board root ----
 CONFIG_FILE = "rig_config.json"
 _PERSISTED_FIELDS = {
     "x": ("speed",),
-    "y": ("min", "max", "speed"),
-    "z": ("min", "max", "speed"),
+    "y": ("min", "max", "speed", "sgthrs"),
+    "z": ("min", "max", "speed", "sgthrs"),
     "a": ("min_deg", "max_deg", "speed"),
 }
 
@@ -110,6 +125,11 @@ def setup_motors():
         m.set_current(current)
         m.set_microsteps(16)
         m.enable_driver(True)
+    # tcoolthrs left generous (StallGuard active across most speeds) - the
+    # sgthrs comparison itself happens in software against the live state
+    # value, so it can be re-tuned via "Y SGTHRS <n>" without touching this.
+    y_motor.enable_stallguard(state["y"]["sgthrs"])
+    z_motor.enable_stallguard(state["z"]["sgthrs"])
     print("X/Y/Z drivers ready")
 
     if servo.ping():
@@ -136,7 +156,16 @@ async def x_task():
 
 
 async def bounce_task(motor, state_key):
-    """Drives Y or Z: bounces back and forth between state["min"]/state["max"]."""
+    """Drives Y or Z: bounces back and forth between state["min"]/state["max"].
+
+    No physical endstops - StallGuard (motor.is_stalled) stands in for one.
+    Checked every STALL_CHECK_EVERY_N_STEPS steps (it's a UART round-trip,
+    too slow to afford every step) while actually moving. A stall clamps
+    MIN/MAX to wherever it actually happened and reverses, instead of
+    grinding the mechanism against whatever it just hit.
+    """
+    step_count = 0
+    steps_since_reversal = 0
     while True:
         st = state[state_key]
         if st["running"]:
@@ -144,6 +173,7 @@ async def bounce_task(motor, state_key):
             if st["pos"] == target:
                 st["dir"] *= -1
                 target = st["max"] if st["dir"] == 1 else st["min"]
+                steps_since_reversal = 0
             step_dir = 1 if target > st["pos"] else -1
             motor.dir.value(1 if step_dir > 0 else 0)
             motor.step.value(1)
@@ -152,7 +182,27 @@ async def bounce_task(motor, state_key):
             period_ms = max(1, int(1000 / max(1, st["speed"])))  # uasyncio here has no sleep_us
             await asyncio.sleep_ms(period_ms)
             st["pos"] += step_dir
+            step_count += 1
+            steps_since_reversal += 1
+
+            if steps_since_reversal >= STALL_SETTLE_STEPS and step_count % STALL_CHECK_EVERY_N_STEPS == 0:
+                try:
+                    stalled = motor.is_stalled(st["sgthrs"])
+                except OSError:
+                    stalled = False  # transient UART hiccup - just skip this check
+                if stalled:
+                    print(state_key.upper(), "StallGuard tripped at pos=%d (%s)" %
+                          (st["pos"], "MAX" if step_dir > 0 else "MIN"))
+                    if step_dir > 0:
+                        st["max"] = st["pos"]
+                    else:
+                        st["min"] = st["pos"]
+                    st["dir"] *= -1
+                    steps_since_reversal = 0
+                    save_config()
         else:
+            step_count = 0
+            steps_since_reversal = 0
             await asyncio.sleep_ms(20)
 
 
@@ -181,10 +231,10 @@ def print_status():
     x, y, z, a = state["x"], state["y"], state["z"], state["a"]
     print("X running=%s speed=%d dir=%s" %
           (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW"))
-    print("Y running=%s speed=%d min=%d max=%d pos=%d" %
-          (y["running"], y["speed"], y["min"], y["max"], y["pos"]))
-    print("Z running=%s speed=%d min=%d max=%d pos=%d" %
-          (z["running"], z["speed"], z["min"], z["max"], z["pos"]))
+    print("Y running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d" %
+          (y["running"], y["speed"], y["min"], y["max"], y["pos"], y["sgthrs"]))
+    print("Z running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d" %
+          (z["running"], z["speed"], z["min"], z["max"], z["pos"], z["sgthrs"]))
     print("A running=%s speed=%d min_deg=%d max_deg=%d" %
           (a["running"], a["speed"], a["min_deg"], a["max_deg"]))
 
@@ -234,6 +284,9 @@ def handle_command(line):
             persist = True
         elif sub == "MAX" and len(parts) >= 3 and cmd in ("Y", "Z"):
             axis["max"] = int(parts[2])
+            persist = True
+        elif sub == "SGTHRS" and len(parts) >= 3 and cmd in ("Y", "Z"):
+            axis["sgthrs"] = int(parts[2])
             persist = True
         elif sub == "MIN" and len(parts) >= 3 and cmd == "A":
             axis["min_deg"] = float(parts[2])

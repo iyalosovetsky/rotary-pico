@@ -18,7 +18,10 @@ REG_GCONF = 0x00
 REG_GSTAT = 0x01
 REG_IOIN = 0x06
 REG_IHOLD_IRUN = 0x10
+REG_TCOOLTHRS = 0x14
 REG_TPWMTHRS = 0x13
+REG_SGTHRS = 0x40
+REG_SG_RESULT = 0x41
 REG_CHOPCONF = 0x6C
 REG_DRV_STATUS = 0x6F
 
@@ -150,6 +153,28 @@ class TMC2209:
     def enable_driver(self, enabled=True):
         if self.en is not None:
             self.en.value(0 if enabled else 1)
+
+    def enable_stallguard(self, sgthrs, tcoolthrs=0xFFFFF):
+        """Sensorless-homing setup (StallGuard4): the driver reports SG_RESULT
+        dropping as the motor is loaded harder (e.g. driven into a mechanical
+        stop). Only active while TSTEP < tcoolthrs, i.e. below a certain speed
+        - tcoolthrs needs to be tuned for whatever speed you actually home at
+        (Klipper's driver_TCOOLTHRS is the same knob). sgthrs (0-255) is the
+        stall threshold: higher = trips more easily. Both need empirical
+        tuning on real hardware/mechanics - there's no universal default.
+        """
+        self.write(REG_TCOOLTHRS, tcoolthrs & 0xFFFFF)
+        self.write(REG_SGTHRS, sgthrs & 0xFF)
+
+    def read_stallguard_result(self):
+        """Lower = more load on the motor; 0 roughly means "stalled"."""
+        return self.read(REG_SG_RESULT) & 0xFFFF
+
+    def is_stalled(self, sgthrs):
+        """Software-side stall check: compares the live SG_RESULT against the
+        same threshold enable_stallguard() was given. Useful because SG_RESULT
+        is only meaningful above the coolstep-configured minimum speed."""
+        return self.read_stallguard_result() <= sgthrs * 2
 
     def move(self, steps, step_delay_us=800):
         """Simple blocking STEP/DIR move - fine for bench testing."""
