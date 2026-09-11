@@ -48,7 +48,7 @@ GPIO numbering and connector assignments cross-checked against the official [big
 | RGB (Neopixel) | IO24 | unused |
 | PROBE | IO22 | free (BLTouch-style signal) |
 | SERVOS | IO29 | free (1 PWM pin — **not suitable** for ST3215 UART, which needs 2 lines) |
-| **Laser** | **IO0 (TX), IO1 (RX)**, GND, 5V | **ST3215 servo bus** via the Waveshare Bus Servo Adapter (A) — these are the exact pins used in `scanner_rig.py` (`ServoBus(uart_id=0, tx=0, rx=1)`) |
+| **Laser** | **IO0 (TX), IO1 (RX)**, GND, 5V | **ST3215 servo bus** via the Waveshare Bus Servo Adapter (A) — these are the exact pins used in `scanner_rig.py` (`ServoBus(uart_id=0, tx=0, rx=1)`). ⚠️ The TX/RX silkscreen labels on this particular adapter board are swapped (mislabeled) — go by what actually works, not the printed labels. |
 | Power | GND, 12/24V | board/driver power input |
 | USB | USB_DP (D+), USB_DM (D-), Type-C | console/REPL, logic power |
 

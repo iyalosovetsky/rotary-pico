@@ -2,33 +2,30 @@
 
 # Troubleshooting log
 
-## ST3215 servo: no response on the bus (unresolved — hardware fault)
+## ST3215 servo: no response on the bus (RESOLVED — driver bug, not hardware)
 
 **Symptom:** after wiring the ST3215 servo through a Waveshare Bus Servo Adapter (A) into the SKR Pico's `Laser` connector (IO0/IO1, see `PINOUT.md`), `scanner_rig.py`/`st3215.py` got `OSError: no reply` on every call — `ping()`, `read_position()`, `set_goal_deg()`.
 
-**Diagnostic steps, in order, each ruling something out:**
+**Root cause:** `st3215.py`'s `write_register`/`read_register` unconditionally drained a "self-echo" after every UART write, copying the pattern from `tmc2209.py` where that's correct — on the TMC2209 bus, TX is wired straight into RX through a resistor, so every transmitted byte genuinely echoes back and must be drained before the real reply. The Waveshare adapter is a different kind of circuit: it's a real transceiver, so our TX and RX stay electrically separate right up to the adapter, and there is **no self-echo on this bus at all**. The servo replies within microseconds - faster than the bogus "echo" read's timeout - so that drain call was silently swallowing the servo's real reply every single time, then timing out waiting for a second reply that would never come. This happened identically regardless of servo unit, cable, jumper position, or baud rate, which is exactly why none of those varied.
 
-1. **Adapter jumper position** — confirmed set to `A` (required for external-MCU UART mode, as opposed to `B` which routes the adapter's own USB port instead). Correct.
-2. **Adapter power** — power LED on the adapter lit. Confirmed powered.
-3. **TX/RX crossing** — confirmed SKR Pico TX (IO0) → adapter RX, SKR Pico RX (IO1) → adapter TX (not straight-through). Correct.
-4. **MCU-side loopback test** — shorted IO0 and IO1 together directly at the SKR Pico connector (adapter disconnected) and sent raw bytes over `UART(0, tx=Pin(0), rx=Pin(1))`. Bytes echoed back correctly → **RP2040 pins/UART0 hardware confirmed fully healthy**, ruling out the MCU entirely.
-5. **Baud rate sweep** — tried all 9 standard SC/STS baud rates (1000000, 500000, 250000, 115200, 76800, 57600, 38400, 19200, 9600) with broadcast + narrow ID scan. No response at any rate.
-6. **Servo power** — an LED lit inside the servo itself, confirming VCC/GND reach the servo's control board.
-7. **Cable swap** — replaced the servo bus cable. No change.
-8. **Full servo ID sweep** — scanned all 254 possible IDs (0-253) at the two most likely baud rates (1000000, 115200) using `st3215.py`. Nothing responded.
-9. **Independent verification with the official Waveshare SDK** — disconnected the SKR Pico entirely, plugged the adapter directly into a PC via USB (it exposes its own USB-serial chip), fetched the official `scservo_sdk` (from [ftservo/FTServo_Python](https://github.com/ftservo/FTServo_Python), now vendored in `scservo_sdk/`) and ran the stock `STServo_Python/ping.py` example against it. Result: **`[TxRxResult] There is no status packet!`** — identical failure, from Waveshare's own code, completely independent of the SKR Pico, MicroPython, or this repo's `st3215.py`.
+**How it was found:** extensive hardware-side diagnosis (MCU-pin loopback test, cable swap, full baud/ID sweep, independent verification against the official Waveshare `scservo_sdk` run directly against the adapter over USB) ruled out every piece of hardware in the chain, including the servo units themselves - see the diagnostic steps below, still accurate as a record of what was checked, even though the conclusion drawn from them at the time was wrong. The actual bug was found by comparing against a working third-party MicroPython driver, which didn't drain any echo unless an explicit half-duplex `dir_pin` was configured (see `sts3215.py` for that reference implementation) - the SKR Pico/Waveshare-adapter setup here doesn't use one.
 
-**Conclusion:** the custom `st3215.py` driver is confirmed correct (the official SDK fails identically). The SKR Pico, its GPIO pins, and the wiring/crossing/jumper are all confirmed healthy. The fault is physically located somewhere in **adapter ↔ cable ↔ servo** — most likely the adapter's signal-line circuitry or the servo's own UART transceiver, since the power/VCC path is confirmed working on both ends (LEDs lit) while the signal path carries nothing at all, even after a cable swap.
+**Fix:** removed the erroneous `self._read_exact(len(pkt))` call after `self.uart.write(pkt)` in `st3215.py`'s `_txrx`. Confirmed working end-to-end through the SKR Pico afterward: `ping()`, `read_position()`, and `set_goal_deg()` all succeed and the servo physically moves.
 
-**Not yet tried (next steps if this comes up again):**
-- Continuity-check the Signal line specifically with a multimeter, adapter port to servo connector.
-- Swap in a different servo or a different adapter board, if available, to isolate which specific unit is at fault.
-- Try the adapter's other servo port, if it has more than one.
+**Diagnostic steps taken along the way (all correctly ruled out hardware, which was never actually the problem):**
+
+1. **Adapter jumper position** — confirmed `A` (external-MCU UART mode) for SKR Pico use, `B` for direct-PC/USB use. Both work correctly with the fixed driver; the earlier confusion was largely from having the jumper in the wrong position during a couple of PC-direct isolation tests, compounding the real (driver) bug.
+2. **Adapter power** — power LED lit, confirmed powered.
+3. **TX/RX crossing** — confirmed correct (SKR Pico TX → adapter RX, SKR Pico RX → adapter TX).
+4. **MCU-side loopback test** — shorted IO0/IO1 together directly at the SKR Pico connector, sent raw bytes over `UART(0, tx=Pin(0), rx=Pin(1))`, got them back. Confirmed the RP2040 pins/UART0 hardware healthy (this was always true; the bug was downstream in application-level packet handling, not the hardware UART).
+5. **Baud rate / full ID sweep**, **cable swap**, **servo swap**, **independent official-SDK verification over direct USB** — all done, all pointed at "the servo/adapter doesn't answer", because the *same class of bug* (an extra blocking read before reading the real reply) doesn't exist in the official SDK or in a correctly-written driver, so those channels worked once the jumper was set correctly - which is what made it look like a hardware fault specific to the SKR-Pico path.
 
 ## Setup notes for the official Waveshare SDK (`STServo_Python/`)
 
 The demo scripts in `STServo_Python/` came from Waveshare without their `scservo_sdk` dependency — it's vendored separately in `scservo_sdk/` (fetched from the official `ftservo/FTServo_Python` repo) so `sys.path.append("..")` + `from scservo_sdk import *` resolves.
 
-Each script hardcodes `DEVICENAME` (Windows `COM*` by default) — set it to the actual device, e.g. `/dev/ttyACM0` on Linux.
+Each script hardcodes `DEVICENAME` (Windows `COM*` by default) — set it to the actual device, e.g. `/dev/ttyACM0` on Linux. `ping.py`'s `BAUDRATE` was also hardcoded to `115200`, not the ST/STS-series factory default `1000000` — fixed in this repo's copy.
 
 `ping.py` (and others) use `termios` at import time to support a "press any key" prompt, which throws `termios.error: (25, 'Inappropriate ioctl for device')` if stdin isn't a real TTY (e.g. run from a non-interactive script/CI). Run interactively, or wrap with `script -qec "python3 ping.py" /dev/null` to allocate a pseudo-terminal.
+
+For quick command-line checks without the keypress prompt, use `STServo_Python/simple_ping.py` and `STServo_Python/simple_rotate.py`.

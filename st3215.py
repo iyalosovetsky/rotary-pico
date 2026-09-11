@@ -6,8 +6,15 @@ register table below are taken directly from those sources).
 The servo itself is single-wire half-duplex. A plain MCU UART has
 separate TX/RX pins, so you need a small transceiver between them and
 the servo's signal wire (e.g. Waveshare's "Bus Servo Adapter" board, or
-a one-transistor combiner) - same idea as the TMC2209 resistor trick,
-just a different circuit because this bus doesn't tri-state on its own.
+a one-transistor combiner).
+
+Unlike the TMC2209 bus (tmc2209.py), where TX is wired straight into RX
+through a resistor and every transmitted byte genuinely echoes back, the
+Waveshare adapter is a real transceiver: our TX and RX stay electrically
+separate right up to the adapter, so there is no self-echo to drain here.
+Draining for one anyway would (and did) swallow the servo's real reply,
+since it can arrive within microseconds of the request - faster than a
+drain read times out.
 """
 
 from machine import UART, Pin
@@ -57,7 +64,6 @@ class ServoBus:
         checksum = (servo_id + length + instruction + sum(params)) & 0xFF
         pkt.append((~checksum) & 0xFF)
         self.uart.write(pkt)
-        self._read_exact(len(pkt))  # drain our own echo (shared single wire)
         if reply_len == 0:
             return b""
         return self._read_exact(reply_len)
