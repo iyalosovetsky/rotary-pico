@@ -10,14 +10,18 @@
 
 Усі три вузли працюють одночасно та незалежно один від одного (кооперативна багатозадачність на `uasyncio`), керування — консольними командами у стилі G-code.
 
+Проєкт надихнений відео [Creality Raptor Turntable](https://www.youtube.com/watch?v=kjL7HI78B2U&t=881s) — у `table_models/` додані моделі поворотного стола цього ж автора.
+
 ### Файли проєкту
 
-| Файл | Призначення |
+| Файл / папка | Призначення |
 |---|---|
 | `tmc2209.py` | Драйвер TMC2209 через UART (спільна шина, адресація по MS1/MS2) |
 | `st3215.py` | Драйвер сервоприводу ST3215 (протокол Feetech SMS/STS) |
 | `scanner_rig.py` | Оркестратор: асинхронні задачі X/Y/сервo + консольний парсер команд |
 | `main.py` | Простий стендовий тест одного мотора (bring-up/діагностика) |
+| `freecad/` | Власні моделі FreeCAD (кроковий двигун, кріплення сервоприводу) |
+| `table_models/` | Моделі поворотного стола (STEP) автора надихаючого відео |
 
 ## 2. Система команд
 
@@ -59,9 +63,9 @@ STATUS
 
 ## 3. Перелік компонентів
 
-| Компонент | Фото | Опис |
-|---|---|---|
-| **BTT SKR Pico V1.0** | <img src="https://cdn.shopify.com/s/files/1/1619/4791/files/PICO_fa4f69b4-1193-4923-99ba-fb467d87f334.jpg?v=1695350854" width="200"> | Керуюча плата на RP2040, 2MB flash, 4 вбудовані драйвери TMC2209 (UART, спільна шина з адресацією MS1/MS2), USB-C |
-| **ST3215** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/s/t/st3215-servo-1_5.jpg" width="200"> | Serial bus servo (Feetech SMS/STS), 360° магнітний енкодер, керування по UART (single-wire), momento до 30 кг·см |
-| **NEMA17 34mm** | <img src="https://upload.wikimedia.org/wikipedia/commons/8/83/Nema_17_Stepper_Motor.jpg" width="200"> | Кроковий двигун, коротка (34мм) версія — знижений момент, менша вага/габарит, під драйвери TMC2209 |
-| **Waveshare Bus Servo Adapter (A)** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/b/u/bus-servo-adapter-a-1_2.jpg" width="200"> | Перехідник UART (TX/RX) → однопровідна напівдуплексна шина сервоприводів Feetech/Waveshare, живлення сервоприводу |
+| Компонент | Фото | Опис | Документація |
+|---|---|---|---|
+| **BTT SKR Pico V1.0** | <img src="https://cdn.shopify.com/s/files/1/1619/4791/files/PICO_fa4f69b4-1193-4923-99ba-fb467d87f334.jpg?v=1695350854" width="200"> | Керуюча плата на RP2040, 2MB flash, 4 вбудовані драйвери TMC2209 (UART, спільна шина з адресацією MS1/MS2), USB-C | [GitHub: bigtreetech/SKR-Pico](https://github.com/bigtreetech/SKR-Pico) |
+| **ST3215** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/s/t/st3215-servo-1_5.jpg" width="200"> | Serial bus servo (Feetech SMS/STS), 360° магнітний енкодер, керування по UART (single-wire), momento до 30 кг·см | [Waveshare Wiki: ST3215 Servo](https://www.waveshare.com/wiki/ST3215_Servo) |
+| **NEMA17 34mm** | <img src="https://upload.wikimedia.org/wikipedia/commons/8/83/Nema_17_Stepper_Motor.jpg" width="200"> | Кроковий двигун, коротка (34мм) версія — знижений момент, менша вага/габарит, під драйвери TMC2209 | — |
+| **Waveshare Bus Servo Adapter (A)** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/b/u/bus-servo-adapter-a-1_2.jpg" width="200"> | Перехідник UART (TX/RX) → однопровідна напівдуплексна шина сервоприводів Feetech/Waveshare, живлення сервоприводу | [Waveshare Wiki: Bus Servo Adapter (A)](https://www.waveshare.com/wiki/Bus_Servo_Adapter_(A)) |
