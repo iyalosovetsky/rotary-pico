@@ -341,6 +341,16 @@ def stop_all():
 
 
 def handle_command(line):
+    """Never raises - any failure below is reported to the console instead
+    of propagating up through console_task and killing asyncio.gather()
+    (and with it every other axis's motion, not just the console)."""
+    try:
+        _dispatch_command(line)
+    except Exception as e:
+        print("? command failed (%s):" % type(e).__name__, e, "-", line)
+
+
+def _dispatch_command(line):
     parts = line.strip().split()
     if not parts:
         return
