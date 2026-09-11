@@ -21,6 +21,7 @@ Console commands (G-code-like, one per line):
     Y MAX <steps>
     Y SPEED <steps_per_sec>     unsigned
     Y SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
+    Y HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
     Y START
     Y STOP
 
@@ -28,6 +29,7 @@ Console commands (G-code-like, one per line):
     Z MAX <steps>
     Z SPEED <steps_per_sec>     unsigned
     Z SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
+    Z HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
     Z START
     Z STOP
 
@@ -38,6 +40,14 @@ the real position it stalled at and the axis reverses, instead of
 grinding against the stop. SGTHRS (0-255, higher trips more easily)
 needs tuning by hand for your actual mechanics/speed - there's no
 universal default.
+
+HOME deliberately drives toward one end until it stalls (instead of
+waiting for that to happen during normal bouncing), for an initial
+calibration before the first START. DEC = decreasing position, INC =
+increasing. Direction and speed given are remembered (Y defaults to
+DEC, Z to INC, both at 150 steps/sec) - "Y HOME" alone reuses whatever
+was last set. A stall toward DEC sets MIN to that position, toward INC
+sets MAX.
 
     A MIN <deg>
     A MAX <deg>
@@ -77,11 +87,15 @@ Y_CURRENT_MA = 500
 Z_CURRENT_MA = 500
 
 CYCLE_DEFAULT_MINUTES = 5
+HOME_SPEED_DEFAULT = 150  # deliberately gentler than the normal bounce SPEED default
+HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SGTHRS, broken wiring)
 
 state = {
     "x": {"running": False, "speed": 200},
-    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 10},
-    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 10},
+    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 10,
+          "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT},
+    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 10,
+          "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
 
@@ -90,12 +104,12 @@ STALL_SETTLE_STEPS = 40  # SG_RESULT reads ~0 (not "stalled", just not-yet-valid
                           # couple dozen steps after starting from a stop - skip checking
                           # until it's had time to settle, or every reversal false-trips
 
-# ---- persisted MIN/MAX/SPEED/SGTHRS, saved to/loaded from a file at the board root ----
+# ---- persisted MIN/MAX/SPEED/SGTHRS/HOME_*, saved to/loaded from a file at the board root ----
 CONFIG_FILE = "rig_config.json"
 _PERSISTED_FIELDS = {
     "x": ("speed",),
-    "y": ("min", "max", "speed", "sgthrs"),
-    "z": ("min", "max", "speed", "sgthrs"),
+    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed"),
+    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed"),
     "a": ("min_deg", "max_deg", "speed"),
 }
 
@@ -114,12 +128,20 @@ def load_config():
     try:
         with open(CONFIG_FILE) as f:
             cfg = json.load(f)
+        print("loaded", CONFIG_FILE)
     except (OSError, ValueError):
-        return  # no config file yet, or it's corrupt - keep the defaults above
-    for axis, fields in cfg.items():
-        if axis in state:
-            state[axis].update(fields)
-    print("loaded", CONFIG_FILE)
+        cfg = {}  # no config file yet, or it's corrupt - fall through to write the defaults
+
+    missing_defaults = False
+    for axis, fields in _PERSISTED_FIELDS.items():
+        saved = cfg.get(axis, {})
+        state[axis].update(saved)
+        if any(field not in saved for field in fields):
+            missing_defaults = True  # new field (or a brand new file) - persist the default
+
+    if missing_defaults:
+        save_config()
+        print("saved defaults for missing", CONFIG_FILE, "fields")
 
 
 load_config()
@@ -211,6 +233,51 @@ async def bounce_task(motor, state_key):
             step_count = 0
             steps_since_reversal = 0
             await asyncio.sleep_ms(20)
+
+
+async def home_axis(motor, state_key):
+    """Deliberately drives toward state["home_dir"] at state["home_speed"]
+    until StallGuard trips, then sets MIN (DEC) or MAX (INC) to where it
+    stopped. Meant for an explicit "Y HOME"/"Z HOME" console command, run
+    once before the axis is first START-ed - not part of normal bouncing.
+    """
+    st = state[state_key]
+    if st["running"]:
+        print(state_key.upper(), "HOME: stop the axis first")
+        return
+
+    direction = st["home_dir"]
+    speed = st["home_speed"]
+    period_ms = max(1, int(1000 / max(1, speed)))
+    motor.dir.value(1 if direction > 0 else 0)
+    print(state_key.upper(), "homing %s at %d steps/sec..." %
+          ("INC" if direction > 0 else "DEC", speed))
+
+    steps_since_start = 0
+    for _ in range(HOME_SAFETY_MAX_STEPS):
+        motor.step.value(1)
+        time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
+        motor.step.value(0)
+        await asyncio.sleep_ms(period_ms)
+        st["pos"] += direction
+        steps_since_start += 1
+
+        if steps_since_start >= STALL_SETTLE_STEPS and steps_since_start % STALL_CHECK_EVERY_N_STEPS == 0:
+            try:
+                stalled = motor.is_stalled(st["sgthrs"])
+            except OSError:
+                stalled = False  # transient UART hiccup - just skip this check
+            if stalled:
+                if direction > 0:
+                    st["max"] = st["pos"]
+                else:
+                    st["min"] = st["pos"]
+                save_config()
+                print(state_key.upper(), "homed, pos=%d" % st["pos"])
+                return
+
+    print(state_key.upper(), "HOME failed: StallGuard never tripped after",
+          HOME_SAFETY_MAX_STEPS, "steps - check SGTHRS/wiring")
 
 
 async def servo_task():
@@ -333,6 +400,17 @@ def handle_command(line):
         elif sub == "SGTHRS" and len(parts) >= 3 and cmd in ("Y", "Z"):
             axis["sgthrs"] = int(parts[2])
             persist = True
+        elif sub == "HOME" and cmd in ("Y", "Z"):
+            idx = 2
+            if len(parts) > idx and parts[idx].upper() in ("DEC", "INC"):
+                axis["home_dir"] = 1 if parts[idx].upper() == "INC" else -1
+                persist = True
+                idx += 1
+            if len(parts) > idx:
+                axis["home_speed"] = int(parts[idx])
+                persist = True
+            motor = y_motor if cmd == "Y" else z_motor
+            asyncio.create_task(home_axis(motor, cmd.lower()))
         elif sub == "MIN" and len(parts) >= 3 and cmd == "A":
             axis["min_deg"] = float(parts[2])
             persist = True
