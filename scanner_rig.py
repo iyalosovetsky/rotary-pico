@@ -1,4 +1,4 @@
-"""Turntable + line-scan + tilt-servo controller for the DIY Creality
+HELP_TEXT = """Turntable + line-scan + tilt-servo controller for the DIY Creality
 Raptor-style 3D scanner rig.
 
   X = turntable (continuous rotation)
@@ -350,7 +350,7 @@ def handle_command(line):
         print_status()
         return
     if cmd == "HELP":
-        print(__doc__)
+        print(HELP_TEXT)
         return
     if cmd == "START":
         try:
