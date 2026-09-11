@@ -3,3 +3,7 @@
 *.FCStd1
 *.FCStd2
 .~lock.*
+
+# Python
+__pycache__/
+*.pyc
