@@ -1,55 +1,57 @@
-# BTT SKR Pico V1.0 — розпіновка
+*[Українська версія](PINOUT.uk.md)*
 
-GPIO-нумерація та призначення конекторів звірені з офіційною схемою [bigtreetech/SKR-Pico](https://github.com/bigtreetech/SKR-Pico) (`Klipper/Images/pinout.png`). Колонка "У проєкті" — як пін використовується в цьому репозиторії (`tmc2209.py`, `st3215.py`, `scanner_rig.py`).
+# BTT SKR Pico V1.0 — Pinout
 
-## Крокові двигуни
+GPIO numbering and connector assignments cross-checked against the official [bigtreetech/SKR-Pico](https://github.com/bigtreetech/SKR-Pico) diagram (`Klipper/Images/pinout.png`). The "In this project" column shows how each pin is actually used here (`tmc2209.py`, `st3215.py`, `scanner_rig.py`).
 
-| Вісь | EN | STEP | DIR | UART address | У проєкті |
+## Stepper motors
+
+| Axis | EN | STEP | DIR | UART address | In this project |
 |---|---|---|---|---|---|
-| X | IO12 | IO11 | IO10 | 0 | Стіл — безкінечне обертання |
-| Y | IO7 | IO6 | IO5 | 2 | Каретка сканера — гойдалка MIN↔MAX |
-| Z | IO2 | IO19 | IO28 | 1 | не використовується |
-| E0 | IO15 | IO14 | IO13 | 3 | не використовується |
+| X | IO12 | IO11 | IO10 | 0 | Table — continuous rotation |
+| Y | IO7 | IO6 | IO5 | 2 | Scanner carriage — bounces between MIN/MAX |
+| Z | IO2 | IO19 | IO28 | 1 | unused |
+| E0 | IO15 | IO14 | IO13 | 3 | unused |
 
-**Motor UART (спільна шина, всі 4 драйвери):** TX = IO8, RX = IO9
+**Motor UART (shared bus, all 4 drivers):** TX = IO8, RX = IO9
 
-## Кінцевики (endstops)
+## Endstops
 
-| Конектор | Сигнал | У проєкті |
+| Connector | Signal | In this project |
 |---|---|---|
-| X-STOP | IO4 | вільний (рух відкритий, без хомінгу) |
-| Y-STOP | IO3 | вільний |
-| Z-STOP | IO25 | вільний |
-| E0-STOP | IO16 | вільний |
+| X-STOP | IO4 | free (open-loop motion, no homing) |
+| Y-STOP | IO3 | free |
+| Z-STOP | IO25 | free |
+| E0-STOP | IO16 | free |
 
-## Термістори / нагрівачі
+## Thermistors / heaters
 
-| Конектор | Сигнал | У проєкті |
+| Connector | Signal | In this project |
 |---|---|---|
-| TH0 | IO27 | не використовується |
-| THB | IO26 | не використовується |
-| HE (нагрівач хотенда) | IO23 | не використовується |
-| HB (нагрівач стола) | IO21 | не використовується |
+| TH0 | IO27 | unused |
+| THB | IO26 | unused |
+| HE (hotend heater) | IO23 | unused |
+| HB (bed heater) | IO21 | unused |
 
-## Вентилятори
+## Fans
 
-| Конектор | Сигнал | У проєкті |
+| Connector | Signal | In this project |
 |---|---|---|
-| FAN1 | IO17 | вільний |
-| FAN2 | IO18 | вільний |
-| FAN3 | IO20 | вільний |
+| FAN1 | IO17 | free |
+| FAN2 | IO18 | free |
+| FAN3 | IO20 | free |
 
-## Інше
+## Other
 
-| Конектор | Сигнал(и) | У проєкті |
+| Connector | Signal(s) | In this project |
 |---|---|---|
-| RGB (Neopixel) | IO24 | не використовується |
-| PROBE | IO22 | вільний (сигнал BLTouch-типу) |
-| SERVOS | IO29 | вільний (1 PWM-пін, **не підходить** під UART ST3215 — потрібні 2 лінії) |
-| **Laser** | **IO0 (TX), IO1 (RX)**, GND, 5V | **шина сервопривода ST3215** через Waveshare Bus Servo Adapter (A) — саме ці піни підставлені в `scanner_rig.py` (`ServoBus(uart_id=0, tx=0, rx=1)`) |
-| Power | GND, 12/24V | силове живлення плати/драйверів |
-| USB | USB_DP (D+), USB_DM (D-), Type-C | консоль/REPL, живлення логіки |
+| RGB (Neopixel) | IO24 | unused |
+| PROBE | IO22 | free (BLTouch-style signal) |
+| SERVOS | IO29 | free (1 PWM pin — **not suitable** for ST3215 UART, which needs 2 lines) |
+| **Laser** | **IO0 (TX), IO1 (RX)**, GND, 5V | **ST3215 servo bus** via the Waveshare Bus Servo Adapter (A) — these are the exact pins used in `scanner_rig.py` (`ServoBus(uart_id=0, tx=0, rx=1)`) |
+| Power | GND, 12/24V | board/driver power input |
+| USB | USB_DP (D+), USB_DM (D-), Type-C | console/REPL, logic power |
 
-## Вільні піни для розширення
+## Free pins for expansion
 
-Z (`step=IO19 dir=IO28 en=IO2`, addr=1) і E0 (`step=IO14 dir=IO13 en=IO15`, addr=3) — повністю вільні мотор-канали на тій самій UART-шині TMC2209, якщо знадобиться ще одна вісь (наприклад, окрема фокусировка). Кінцевики, термістори, нагрівачі, FAN1-3, RGB, PROBE — теж вільні.
+Z (`step=IO19 dir=IO28 en=IO2`, addr=1) and E0 (`step=IO14 dir=IO13 en=IO15`, addr=3) are fully free motor channels on the same TMC2209 UART bus, in case another axis is needed (e.g. a separate focus mechanism). Endstops, thermistors, heaters, FAN1-3, RGB, and PROBE are also free.

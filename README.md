@@ -1,51 +1,53 @@
+*[Українська версія](README.uk.md)*
+
 # rotary-pico
 
-## 1. Опис
+## 1. Description
 
-Керуючий модуль для саморобного поворотного стола (turntable) під 3D-сканер типу Creality Raptor, на базі плати **BTT SKR Pico** (RP2040, MicroPython).
+Control firmware for a DIY turntable rig for a Creality Raptor-style 3D scanner, built on a **BTT SKR Pico** board (RP2040, MicroPython).
 
-- **Вісь X** — обертає стіл (безкінечне обертання, керування швидкістю).
-- **Вісь Y** — переміщує каретку зі сканером над столом (циклічний рух між нижньою та верхньою межею).
-- **Сервопривід ST3215** — нахиляє голову сканера (циклічний рух між мінімальним і максимальним кутом).
+- **X axis** — rotates the table (continuous rotation, speed control).
+- **Y axis** — moves the scanner carriage over the table (cyclic motion between a lower and upper limit).
+- **ST3215 servo** — tilts the scanner head (cyclic motion between a minimum and maximum angle).
 
-Усі три вузли працюють одночасно та незалежно один від одного (кооперативна багатозадачність на `uasyncio`), керування — консольними командами у стилі G-code.
+All three run concurrently and independently of each other (cooperative multitasking via `uasyncio`), controlled through G-code-like console commands.
 
-Проєкт надихнений відео [Creality Raptor Turntable](https://www.youtube.com/watch?v=kjL7HI78B2U&t=881s) — у `table_models/` додані моделі поворотного стола цього ж автора.
+The project was inspired by the [Creality Raptor Turntable](https://www.youtube.com/watch?v=kjL7HI78B2U&t=881s) video — `table_models/` contains the turntable models from the same author.
 
-### Файли проєкту
+### Project files
 
-| Файл / папка | Призначення |
+| File / folder | Purpose |
 |---|---|
-| `tmc2209.py` | Драйвер TMC2209 через UART (спільна шина, адресація по MS1/MS2) |
-| `st3215.py` | Драйвер сервоприводу ST3215 (протокол Feetech SMS/STS) |
-| `scanner_rig.py` | Оркестратор: асинхронні задачі X/Y/сервo + консольний парсер команд |
-| `main.py` | Простий стендовий тест одного мотора (bring-up/діагностика) |
-| `freecad/` | Власні моделі FreeCAD (кроковий двигун, кріплення сервоприводу) |
-| `table_models/` | Моделі поворотного стола (STEP) автора надихаючого відео |
+| `tmc2209.py` | TMC2209 driver over UART (shared bus, MS1/MS2 addressing) |
+| `st3215.py` | ST3215 servo driver (Feetech SMS/STS protocol) |
+| `scanner_rig.py` | Orchestrator: async X/Y/servo tasks + console command parser |
+| `main.py` | Simple single-motor bench test (bring-up/diagnostics) |
+| `freecad/` | Own FreeCAD models (stepper motor, servo mount) |
+| `table_models/` | Turntable models (STEP) from the inspiring video's author |
 
-## 2. Система команд
+## 2. Command reference
 
-Команди подаються по одній на рядок у консолі (REPL):
+Commands are sent one per line over the console (REPL):
 
-| Команда | Опис |
+| Command | Description |
 |---|---|
-| `X SPEED <steps_per_sec>` | Швидкість обертання столу (знак визначає напрямок, 0 = стоп) |
-| `X START` | Почати обертання столу |
-| `X STOP` | Зупинити обертання столу |
-| `Y MIN <steps>` | Нижня межа руху каретки (в мікрокроках) |
-| `Y MAX <steps>` | Верхня межа руху каретки (в мікрокроках) |
-| `Y SPEED <steps_per_sec>` | Швидкість руху каретки |
-| `Y START` | Почати циклічний рух каретки між `MIN` і `MAX` |
-| `Y STOP` | Зупинити каретку |
-| `S MIN <deg>` | Мінімальний кут нахилу сканера (градуси) |
-| `S MAX <deg>` | Максимальний кут нахилу сканера (градуси) |
-| `S SPEED <raw_units>` | Швидкість сервоприводу (внутрішні одиниці регістра, підбирається емпірично) |
-| `S START` | Почати циклічний нахил між `MIN` і `MAX` |
-| `S STOP` | Зупинити сервопривід |
-| `STATUS` | Поточний стан усіх трьох осей |
-| `HELP` | Довідка по командах |
+| `X SPEED <steps_per_sec>` | Table rotation speed (sign sets direction, 0 = stopped) |
+| `X START` | Start table rotation |
+| `X STOP` | Stop table rotation |
+| `Y MIN <steps>` | Lower limit of carriage travel (microsteps) |
+| `Y MAX <steps>` | Upper limit of carriage travel (microsteps) |
+| `Y SPEED <steps_per_sec>` | Carriage speed |
+| `Y START` | Start cyclic motion between `MIN` and `MAX` |
+| `Y STOP` | Stop the carriage |
+| `S MIN <deg>` | Minimum scanner tilt angle (degrees) |
+| `S MAX <deg>` | Maximum scanner tilt angle (degrees) |
+| `S SPEED <raw_units>` | Servo speed (raw register units, tune empirically) |
+| `S START` | Start cyclic tilt between `MIN` and `MAX` |
+| `S STOP` | Stop the servo |
+| `STATUS` | Current state of all three axes |
+| `HELP` | Command help |
 
-Приклад сеансу:
+Example session:
 
 ```
 X SPEED 200
@@ -61,11 +63,11 @@ S START
 STATUS
 ```
 
-## 3. Перелік компонентів
+## 3. Component list
 
-| Компонент | Фото | Опис | Документація |
+| Component | Photo | Description | Docs |
 |---|---|---|---|
-| **BTT SKR Pico V1.0** | <img src="https://cdn.shopify.com/s/files/1/1619/4791/files/PICO_fa4f69b4-1193-4923-99ba-fb467d87f334.jpg?v=1695350854" width="200"> | Керуюча плата на RP2040, 2MB flash, 4 вбудовані драйвери TMC2209 (UART, спільна шина з адресацією MS1/MS2), USB-C | [GitHub: bigtreetech/SKR-Pico](https://github.com/bigtreetech/SKR-Pico) |
-| **ST3215** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/s/t/st3215-servo-1_5.jpg" width="200"> | Serial bus servo (Feetech SMS/STS), 360° магнітний енкодер, керування по UART (single-wire), momento до 30 кг·см | [Waveshare Wiki: ST3215 Servo](https://www.waveshare.com/wiki/ST3215_Servo) |
-| **NEMA17 34mm** | <img src="https://upload.wikimedia.org/wikipedia/commons/8/83/Nema_17_Stepper_Motor.jpg" width="200"> | Кроковий двигун, коротка (34мм) версія — знижений момент, менша вага/габарит, під драйвери TMC2209 | — |
-| **Waveshare Bus Servo Adapter (A)** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/b/u/bus-servo-adapter-a-1_2.jpg" width="200"> | Перехідник UART (TX/RX) → однопровідна напівдуплексна шина сервоприводів Feetech/Waveshare, живлення сервоприводу | [Waveshare Wiki: Bus Servo Adapter (A)](https://www.waveshare.com/wiki/Bus_Servo_Adapter_(A)) |
+| **BTT SKR Pico V1.0** | <img src="https://cdn.shopify.com/s/files/1/1619/4791/files/PICO_fa4f69b4-1193-4923-99ba-fb467d87f334.jpg?v=1695350854" width="200"> | RP2040 control board, 2MB flash, 4 onboard TMC2209 drivers (UART, shared bus with MS1/MS2 addressing), USB-C | [GitHub: bigtreetech/SKR-Pico](https://github.com/bigtreetech/SKR-Pico) |
+| **ST3215** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/s/t/st3215-servo-1_5.jpg" width="200"> | Serial bus servo (Feetech SMS/STS), 360° magnetic encoder, UART control (single-wire), up to 30 kg·cm torque | [Waveshare Wiki: ST3215 Servo](https://www.waveshare.com/wiki/ST3215_Servo) |
+| **NEMA17 34mm** | <img src="https://upload.wikimedia.org/wikipedia/commons/8/83/Nema_17_Stepper_Motor.jpg" width="200"> | Stepper motor, short (34mm) version — lower torque, smaller size/weight, driven by TMC2209 | — |
+| **Waveshare Bus Servo Adapter (A)** | <img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/b/u/bus-servo-adapter-a-1_2.jpg" width="200"> | UART (TX/RX) → single-wire half-duplex bus adapter for Feetech/Waveshare servos, powers the servo | [Waveshare Wiki: Bus Servo Adapter (A)](https://www.waveshare.com/wiki/Bus_Servo_Adapter_(A)) |
