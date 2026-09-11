@@ -4,7 +4,7 @@ Raptor-style 3D scanner rig.
   X = turntable (continuous rotation)
   Y = scanner carriage (bounces between two limits over the table)
   Z = third axis (bounces between two limits, same as Y)
-  S = ST3215 servo tilting the scanner head (bounces between two angles)
+  A = ST3215 servo tilting the scanner head (bounces between two angles)
 
 Console commands (G-code-like, one per line):
 
@@ -24,11 +24,11 @@ Console commands (G-code-like, one per line):
     Z START
     Z STOP
 
-    S MIN <deg>
-    S MAX <deg>
-    S SPEED <raw_units>         servo-internal speed register, try 0-1000
-    S START
-    S STOP
+    A MIN <deg>
+    A MAX <deg>
+    A SPEED <raw_units>         servo-internal speed register, try 0-1000
+    A START
+    A STOP
 
     STATUS
     HELP
@@ -64,7 +64,7 @@ state = {
     "x": {"running": False, "speed": 200},
     "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1},
     "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1},
-    "s": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
+    "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
 
 
@@ -81,7 +81,7 @@ def setup_motors():
         servo.torque_enable(True)
         print("servo ready")
     else:
-        print("WARNING: servo did not respond to ping - check wiring/id, S commands will fail")
+        print("WARNING: servo did not respond to ping - check wiring/id, A commands will fail")
 
 
 # ---------------- motion tasks ----------------
@@ -124,7 +124,7 @@ async def bounce_task(motor, state_key):
 async def servo_task():
     going_to_max = True
     while True:
-        st = state["s"]
+        st = state["a"]
         if st["running"]:
             target_deg = st["max_deg"] if going_to_max else st["min_deg"]
             servo.set_goal_deg(target_deg, speed=st["speed"])
@@ -143,15 +143,15 @@ async def servo_task():
 # ---------------- console ----------------
 
 def print_status():
-    x, y, z, s = state["x"], state["y"], state["z"], state["s"]
+    x, y, z, a = state["x"], state["y"], state["z"], state["a"]
     print("X running=%s speed=%d dir=%s" %
           (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW"))
     print("Y running=%s speed=%d min=%d max=%d pos=%d" %
           (y["running"], y["speed"], y["min"], y["max"], y["pos"]))
     print("Z running=%s speed=%d min=%d max=%d pos=%d" %
           (z["running"], z["speed"], z["min"], z["max"], z["pos"]))
-    print("S running=%s speed=%d min_deg=%d max_deg=%d" %
-          (s["running"], s["speed"], s["min_deg"], s["max_deg"]))
+    print("A running=%s speed=%d min_deg=%d max_deg=%d" %
+          (a["running"], a["speed"], a["min_deg"], a["max_deg"]))
 
 
 def handle_command(line):
@@ -167,12 +167,12 @@ def handle_command(line):
         print(__doc__)
         return
 
-    if cmd not in ("X", "Y", "Z", "S") or len(parts) < 2:
+    if cmd not in ("X", "Y", "Z", "A") or len(parts) < 2:
         print("? unrecognised command:", line)
         return
 
     sub = parts[1].upper()
-    axis = {"X": state["x"], "Y": state["y"], "Z": state["z"], "S": state["s"]}[cmd]
+    axis = {"X": state["x"], "Y": state["y"], "Z": state["z"], "A": state["a"]}[cmd]
 
     try:
         if sub == "START":
@@ -195,9 +195,9 @@ def handle_command(line):
             axis["min"] = int(parts[2])
         elif sub == "MAX" and len(parts) >= 3 and cmd in ("Y", "Z"):
             axis["max"] = int(parts[2])
-        elif sub == "MIN" and len(parts) >= 3 and cmd == "S":
+        elif sub == "MIN" and len(parts) >= 3 and cmd == "A":
             axis["min_deg"] = float(parts[2])
-        elif sub == "MAX" and len(parts) >= 3 and cmd == "S":
+        elif sub == "MAX" and len(parts) >= 3 and cmd == "A":
             axis["max_deg"] = float(parts[2])
         else:
             print("? unrecognised command:", line)
