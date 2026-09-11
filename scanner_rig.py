@@ -9,7 +9,7 @@ Raptor-style 3D scanner rig.
 Console commands (G-code-like, one per line):
 
     X SPEED <steps_per_sec>     signed: sign sets direction, 0 = stopped
-    X START
+    X START [CW|CCW]           direction optional, defaults to CW (or last-used)
     X STOP
 
     Y MIN <steps>
@@ -144,7 +144,8 @@ async def servo_task():
 
 def print_status():
     x, y, z, s = state["x"], state["y"], state["z"], state["s"]
-    print("X running=%s speed=%d" % (x["running"], x["speed"]))
+    print("X running=%s speed=%d dir=%s" %
+          (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW"))
     print("Y running=%s speed=%d min=%d max=%d pos=%d" %
           (y["running"], y["speed"], y["min"], y["max"], y["pos"]))
     print("Z running=%s speed=%d min=%d max=%d pos=%d" %
@@ -175,6 +176,16 @@ def handle_command(line):
 
     try:
         if sub == "START":
+            if cmd == "X" and len(parts) >= 3:
+                direction = parts[2].upper()
+                magnitude = abs(axis["speed"]) or 200  # speed=0 would never turn the motor
+                if direction == "CW":
+                    axis["speed"] = magnitude
+                elif direction == "CCW":
+                    axis["speed"] = -magnitude
+                else:
+                    print("? bad direction (use CW or CCW):", line)
+                    return
             axis["running"] = True
         elif sub == "STOP":
             axis["running"] = False
