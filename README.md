@@ -7,10 +7,10 @@
 Control firmware for a DIY turntable rig for a Creality Raptor-style 3D scanner, built on a **BTT SKR Pico** board (RP2040, MicroPython).
 
 - **X axis** — rotates the table (continuous rotation, speed control).
-- **Y axis** — moves the scanner carriage over the table (cyclic motion between a lower and upper limit).
+- **Y/Z axes** — cyclic motion between a lower and upper limit, no physical endstops: the TMC2209's StallGuard (sensorless homing) detects when the mechanism stalls against its real limit and auto-corrects `MIN`/`MAX` to that position.
 - **ST3215 servo** — tilts the scanner head (cyclic motion between a minimum and maximum angle).
 
-All three run concurrently and independently of each other (cooperative multitasking via `uasyncio`), controlled through G-code-like console commands.
+All axes run concurrently and independently of each other (cooperative multitasking via `uasyncio`), controlled through G-code-like console commands.
 
 The project was inspired by the [Creality Raptor Turntable](https://www.youtube.com/watch?v=kjL7HI78B2U&t=881s) video — `table_models/` contains the turntable models from the same author.
 
@@ -31,17 +31,21 @@ Commands are sent one per line over the console (REPL):
 
 | Command | Description |
 |---|---|
+| `START [minutes]` | Start every axis at once (using whatever they're each already configured with), auto-stop after `minutes` (default 5) |
+| `STOP` | Stop every axis immediately |
 | `X SPEED <steps_per_sec>` | Table rotation speed (sign sets direction, 0 = stopped) |
 | `X START [CW\|CCW]` | Start table rotation - direction optional, defaults to CW (or last-used) |
 | `X STOP` | Stop table rotation |
 | `Y MIN <steps>` | Lower limit of carriage travel (microsteps) |
 | `Y MAX <steps>` | Upper limit of carriage travel (microsteps) |
 | `Y SPEED <steps_per_sec>` | Carriage speed |
+| `Y SGTHRS <0-255>` | StallGuard sensorless-homing threshold (see below) - higher trips more easily |
 | `Y START` | Start cyclic motion between `MIN` and `MAX` |
 | `Y STOP` | Stop the carriage |
 | `Z MIN <steps>` | Lower limit of Z travel (microsteps) |
 | `Z MAX <steps>` | Upper limit of Z travel (microsteps) |
 | `Z SPEED <steps_per_sec>` | Z axis speed |
+| `Z SGTHRS <0-255>` | StallGuard sensorless-homing threshold (see below) - higher trips more easily |
 | `Z START` | Start cyclic motion between `MIN` and `MAX` |
 | `Z STOP` | Stop the Z axis |
 | `A MIN <deg>` | Minimum scanner tilt angle (degrees) |
@@ -71,6 +75,17 @@ A SPEED 300
 A START
 STATUS
 ```
+
+### Y/Z sensorless homing (StallGuard)
+
+Y and Z have no physical endstop switches. Instead, the TMC2209's StallGuard feature (`SG_RESULT`) is polled over UART while the axis is moving - it drops as motor load rises, so driving into a real mechanical stop reads as a stall. When that happens, `MIN`/`MAX` auto-corrects to the actual position it stalled at and the axis reverses, instead of grinding against the stop.
+
+`SGTHRS` has no universal default - it's specific to your motor, current, speed and mechanics, and must be tuned by hand:
+
+1. Set a low `SGTHRS` (e.g. 1-3) and `START` the axis.
+2. Watch the console for `Y StallGuard tripped at pos=... (MIN/MAX)` messages.
+3. Tripping during normal free travel (nothing actually obstructing it) → lower `SGTHRS` further.
+4. Not tripping when it actually hits the real limit → raise `SGTHRS`.
 
 ## 3. Component list
 
