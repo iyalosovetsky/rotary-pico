@@ -41,6 +41,7 @@ existing bench-test main.py.
 import sys
 import select
 import time
+import json
 import uasyncio as asyncio
 
 from tmc2209 import TMC2209Bus, TMC2209, ADDR_X, ADDR_Y, ADDR_Z
@@ -66,6 +67,40 @@ state = {
     "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
+
+# ---- persisted MIN/MAX/SPEED, saved to/loaded from a file at the board root ----
+CONFIG_FILE = "rig_config.json"
+_PERSISTED_FIELDS = {
+    "x": ("speed",),
+    "y": ("min", "max", "speed"),
+    "z": ("min", "max", "speed"),
+    "a": ("min_deg", "max_deg", "speed"),
+}
+
+
+def save_config():
+    cfg = {axis: {field: state[axis][field] for field in fields}
+           for axis, fields in _PERSISTED_FIELDS.items()}
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f)
+    except OSError as e:
+        print("WARNING: failed to save", CONFIG_FILE, "-", e)
+
+
+def load_config():
+    try:
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return  # no config file yet, or it's corrupt - keep the defaults above
+    for axis, fields in cfg.items():
+        if axis in state:
+            state[axis].update(fields)
+    print("loaded", CONFIG_FILE)
+
+
+load_config()
 
 
 def setup_motors():
@@ -174,6 +209,7 @@ def handle_command(line):
     sub = parts[1].upper()
     axis = {"X": state["x"], "Y": state["y"], "Z": state["z"], "A": state["a"]}[cmd]
 
+    persist = False
     try:
         if sub == "START":
             if cmd == "X" and len(parts) >= 3:
@@ -186,19 +222,25 @@ def handle_command(line):
                 else:
                     print("? bad direction (use CW or CCW):", line)
                     return
+                persist = True
             axis["running"] = True
         elif sub == "STOP":
             axis["running"] = False
         elif sub == "SPEED" and len(parts) >= 3:
             axis["speed"] = int(parts[2])
+            persist = True
         elif sub == "MIN" and len(parts) >= 3 and cmd in ("Y", "Z"):
             axis["min"] = int(parts[2])
+            persist = True
         elif sub == "MAX" and len(parts) >= 3 and cmd in ("Y", "Z"):
             axis["max"] = int(parts[2])
+            persist = True
         elif sub == "MIN" and len(parts) >= 3 and cmd == "A":
             axis["min_deg"] = float(parts[2])
+            persist = True
         elif sub == "MAX" and len(parts) >= 3 and cmd == "A":
             axis["max_deg"] = float(parts[2])
+            persist = True
         else:
             print("? unrecognised command:", line)
             return
@@ -207,6 +249,8 @@ def handle_command(line):
         return
 
     print("ok", line)
+    if persist:
+        save_config()
 
 
 async def console_task():
