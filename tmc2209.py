@@ -54,7 +54,15 @@ class TMC2209Bus:
         self.uart = UART(uart_id, baudrate=baudrate, tx=Pin(tx), rx=Pin(rx),
                           timeout=20, timeout_char=5)
 
+    def _flush_rx(self):
+        """Drop any stale bytes sitting in the RX buffer before starting a new
+        transaction - a reply/echo that arrived late (or wasn't fully drained)
+        from a previous call otherwise gets misread as part of this one."""
+        while self.uart.any():
+            self.uart.read()
+
     def write_register(self, address, reg, value):
+        self._flush_rx()
         dg = bytearray(8)
         dg[0] = SYNC
         dg[1] = address
@@ -68,6 +76,7 @@ class TMC2209Bus:
         self._read_exact(len(dg))  # drain our own echo
 
     def read_register(self, address, reg):
+        self._flush_rx()
         req = bytearray(4)
         req[0] = SYNC
         req[1] = address
@@ -173,6 +182,11 @@ class TMC2209:
         stall threshold: higher = trips more easily. Both need empirical
         tuning on real hardware/mechanics - there's no universal default.
         """
+        # IHOLD_IRUN, TCOOLTHRS and SGTHRS are write-only registers on this
+        # chip (per the TMC2209 datasheet's register-access table) - reading
+        # them back always returns 0 regardless of whether the write actually
+        # took effect. Don't use a readback as a way to verify these three;
+        # only GCONF/CHOPCONF/PWMCONF (R+W) are meaningful to read back.
         self.write(REG_TCOOLTHRS, tcoolthrs & 0xFFFFF)
         self.write(REG_SGTHRS, sgthrs & 0xFF)
 
