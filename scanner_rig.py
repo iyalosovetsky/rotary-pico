@@ -49,7 +49,7 @@ HOME deliberately drives toward one end until it stalls (instead of
 waiting for that to happen during normal bouncing), for an initial
 calibration before the first START. DEC = decreasing position, INC =
 increasing. Direction and speed given are remembered (Y defaults to
-DEC, Z to INC, both at 3000 steps/sec) - "Y HOME" alone reuses whatever
+DEC, Z to INC, both at 1000 steps/sec) - "Y HOME" alone reuses whatever
 was last set. A stall toward DEC sets MIN to that position, toward INC
 sets MAX.
 
@@ -101,16 +101,16 @@ HOME_CURRENT_MA = 400  # StallGuard senses more cleanly at a reduced current dur
                         # ~0.49A vs a higher run current) - restored after homing
 
 CYCLE_DEFAULT_MINUTES = 5
-HOME_SPEED_DEFAULT = 3000  # StallGuard's usable signal scales with real velocity (SG_RESULT
-                            # measured higher/more usable at higher microstep rates on real
-                            # hardware - 150, then 500, were both tried first and too slow)
+HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google_test_stall_guard.py:
+                            # 500us pulse half-period = 1kHz). 150, then 500, then 3000 were all
+                            # tried first without a confirmed-working reference point to anchor on.
 HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SGTHRS, broken wiring)
 
 state = {
     "x": {"running": False, "speed": 200},
-    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 3,
+    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 100,
           "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT},
-    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 3,
+    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 100,
           "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
