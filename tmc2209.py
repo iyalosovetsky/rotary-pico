@@ -24,6 +24,7 @@ REG_SGTHRS = 0x40
 REG_SG_RESULT = 0x41
 REG_CHOPCONF = 0x6C
 REG_DRV_STATUS = 0x6F
+REG_PWMCONF = 0x70
 
 # uart_address values from printer.cfg
 ADDR_X = 0
@@ -126,6 +127,15 @@ class TMC2209:
         if spreadcycle:
             gconf |= (1 << 2)
         self.write(REG_GCONF, gconf)
+
+        # pwm_autoscale/pwm_autograd: stealthChop's current-regulation loop needs
+        # these to actually adapt to the motor/load - without them stealthChop
+        # runs "open loop" off whatever pwm_ofs/pwm_grad defaults happen to be,
+        # which is rougher/louder than it should be. Read-modify-write so the
+        # factory pwm_freq/pwm_grad/pwm_ofs defaults are left alone.
+        pwmconf = self.read(REG_PWMCONF)
+        pwmconf |= (1 << 18) | (1 << 19)  # pwm_autoscale, pwm_autograd
+        self.write(REG_PWMCONF, pwmconf)
 
     def set_current(self, run_ma, hold_ma=None, hold_delay=10):
         if hold_ma is None:
