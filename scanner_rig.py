@@ -19,6 +19,8 @@ Console commands (G-code-like, one per line):
     X MOVE <deg>                one-shot relative rotation (signed), axis must
                                  be stopped first - see below
     X ZERO                      make the current position 0 - see below
+    X MICROSTEPS <n>             256/128/64/32/16/8/4/2/1 - see below
+    X CURRENT <mA>               run current - see below
     X TMC                       TMC2209 driver health (faults/temp/current) - see below
 
     Y MIN <steps>
@@ -29,6 +31,8 @@ Console commands (G-code-like, one per line):
     Y LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
     Y MOVE <mm>                 one-shot relative move (signed) - see below
     Y ZERO                      make the current position 0 - see below
+    Y MICROSTEPS <n>             256/128/64/32/16/8/4/2/1 - see below
+    Y CURRENT <mA>               run current - see below
     Y TMC                       TMC2209 driver health (faults/temp/current) - see below
     Y START
     Y STOP
@@ -41,6 +45,8 @@ Console commands (G-code-like, one per line):
     Z LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
     Z MOVE <mm>                 one-shot relative move (signed) - see below
     Z ZERO                      make the current position 0 - see below
+    Z MICROSTEPS <n>             256/128/64/32/16/8/4/2/1 - see below
+    Z CURRENT <mA>               run current - see below
     Z TMC                       TMC2209 driver health (faults/temp/current) - see below
     Z START
     Z STOP
@@ -67,6 +73,18 @@ by hand instead of (or in addition to) a StallGuard-based HOME - e.g.
 X has no HOME at all (continuous rotation, nothing to stall against),
 so ZERO is the only way to give it a zero reference.
 
+X/Y/Z MICROSTEPS changes the driver's microstep resolution live (one of
+256/128/64/32/16/8/4/2/1) and persists it, same as the rig's old fixed
+16 default. Changing it rescales pos/MIN/MAX by the resolution ratio,
+so an existing HOME calibration or current position keeps meaning the
+same real distance - one step is a different physical distance at a
+different microstep setting, so without rescaling, MIN/MAX would
+silently go wrong instead of just needing conversion. X/Y/Z CURRENT
+sets that axis's normal run current in mA (hold current is still
+derived as half of it, see TMC2209.set_current) and persists it -
+separate from HOME_CURRENT_MA, which only applies transiently during
+the HOME move itself.
+
 X/Y/Z TMC reads that driver's own GSTAT/DRV_STATUS registers and
 prints a one-line health summary: OK, or ERROR(...) listing any of
 RESET/DRV_ERR/UV_CP (GSTAT) or OTPW/OT/S2GA/S2GB/S2VSA/S2VSB/OLA/OLB
@@ -89,8 +107,8 @@ current for quiet continuous motion, where the signal isn't reliable
 enough to act on).
 
 Y/Z MOVE takes a distance in millimeters, converted to steps via each
-axis's LEAD (mm per screw revolution) and this rig's fixed
-motor/microstep count. X MOVE takes an angle in degrees instead - X
+axis's LEAD (mm per screw revolution) and its own configured
+MICROSTEPS. X MOVE takes an angle in degrees instead - X
 turns the turntable directly (no screw), so its position is naturally
 angular; it's converted to steps the same way, using degrees instead
 of mm/lead. Both are one-shot open-loop moves at the axis's configured
@@ -162,19 +180,25 @@ z_diag = Pin(25, Pin.IN, Pin.PULL_DOWN)
 servo_bus = ServoBus(uart_id=0, tx=0, rx=1, baudrate=1000000)
 servo = ST3215(servo_bus, servo_id=1)
 
-X_CURRENT_MA = 800
-Y_CURRENT_MA = 800
-Z_CURRENT_MA = 800
 HOME_CURRENT_MA = 830  # matches IRUN=14 in a confirmed-working hand-stall test
                         # (google_test_stall_guard.py) on this exact hardware, via
                         # our own current-scale formula. 400 (a generic "lower is
                         # cleaner for homing" guess, not measured on this hardware)
                         # was tried first and computed out to CS~6, far below that.
+                        # Only used transiently during HOME - X/Y/Z's own configured
+                        # "current_ma" (see state, CURRENT command) is what's restored
+                        # afterward and used for normal bouncing/rotation.
 
 FULL_STEPS_PER_REV = 200  # standard NEMA17, 1.8deg/step - matches every stepper used here
-MICROSTEPS = 16  # matches set_microsteps(MICROSTEPS) in setup_motors
-STEPS_PER_REV = FULL_STEPS_PER_REV * MICROSTEPS  # 3200 microsteps/rev - used by MOVE to
-                                                  # convert mm (via LEAD)/degrees to steps
+                           # (this one isn't user-configurable - unlike microsteps, it's a
+                           # motor property, not a driver setting)
+
+
+def steps_per_rev(state_key):
+    """Microsteps/rev for a given X/Y/Z axis, from its own configurable
+    "microsteps" - each axis can run a different resolution (see the
+    MICROSTEPS command), so this isn't a single shared constant."""
+    return FULL_STEPS_PER_REV * state[state_key]["microsteps"]
 
 CYCLE_DEFAULT_MINUTES = 5
 HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google_test_stall_guard.py:
@@ -183,11 +207,13 @@ HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google
 HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SGTHRS, broken wiring)
 
 state = {
-    "x": {"running": False, "speed": 200, "pos": 0},
+    "x": {"running": False, "speed": 200, "pos": 0, "microsteps": 16, "current_ma": 800},
     "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
-          "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0},
+          "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
+          "microsteps": 16, "current_ma": 800},
     "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
-          "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0},
+          "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
+          "microsteps": 16, "current_ma": 800},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
 
@@ -208,9 +234,11 @@ STALL_CONFIRM_COUNT = 3  # cheap insurance against a single noisy SG_RESULT samp
 # so there's nothing open-loop to track/persist for it. ----
 CONFIG_FILE = "rig_config.json"
 _PERSISTED_FIELDS = {
-    "x": ("speed", "pos"),
-    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos"),
-    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos"),
+    "x": ("speed", "pos", "microsteps", "current_ma"),
+    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
+          "microsteps", "current_ma"),
+    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
+          "microsteps", "current_ma"),
     "a": ("min_deg", "max_deg", "speed"),
 }
 
@@ -249,11 +277,11 @@ load_config()
 
 
 def setup_motors():
-    for m, current in ((x_motor, X_CURRENT_MA), (y_motor, Y_CURRENT_MA), (z_motor, Z_CURRENT_MA)):
+    for key, m in (("x", x_motor), ("y", y_motor), ("z", z_motor)):
         m.check_connection()
         m.enable_uart_mode(spreadcycle=False)
-        m.set_current(current)
-        m.set_microsteps(MICROSTEPS)
+        m.set_current(state[key]["current_ma"])
+        m.set_microsteps(state[key]["microsteps"])
         m.enable_driver(True)
     # TCOOLTHRS is a MINIMUM-speed threshold: DIAG/StallGuard switches ON
     # above that speed (Trinamic datasheet: "lower threshold velocity for
@@ -338,6 +366,29 @@ def zero_position(state_key):
         st["max"] -= offset
 
 
+def set_axis_microsteps(state_key, motor, new_microsteps):
+    """Changes the driver's microstep resolution and rescales pos/MIN/MAX
+    (for Y/Z) by the same ratio. A single step means a different real
+    distance at a different microstep setting, so without rescaling, a
+    MIN/MAX from an earlier HOME (or the current pos) would silently
+    stop meaning the same physical location instead of just needing
+    conversion - same reasoning as zero_position()'s coordinate shift.
+    Writes to the driver first: if new_microsteps isn't a valid setting,
+    TMC2209.set_microsteps() raises ValueError before any state changes.
+    """
+    st = state[state_key]
+    old_microsteps = st["microsteps"]
+    motor.set_microsteps(new_microsteps)
+    if new_microsteps != old_microsteps:
+        ratio = new_microsteps / old_microsteps
+        st["pos"] = round(st["pos"] * ratio)
+        if "min" in st:
+            st["min"] = round(st["min"] * ratio)
+        if "max" in st:
+            st["max"] = round(st["max"] * ratio)
+    st["microsteps"] = new_microsteps
+
+
 async def home_axis(motor, state_key):
     """Deliberately drives toward state["home_dir"] at state["home_speed"]
     until SG_RESULT (polled over UART) drops below SGTHRS, then zeroes pos
@@ -364,7 +415,7 @@ async def home_axis(motor, state_key):
     # StallGuard readings noisy/unreliable; spreadCycle gives a clean signal
     # for homing. Reduced current also senses more cleanly during homing
     # than the normal run current. Both are always restored afterward.
-    run_current_ma = Y_CURRENT_MA if state_key == "y" else Z_CURRENT_MA
+    run_current_ma = st["current_ma"]
     motor.enable_uart_mode(spreadcycle=True)
     motor.set_current(HOME_CURRENT_MA)
     try:
@@ -420,16 +471,17 @@ async def home_axis(motor, state_key):
 
 async def move_linear_axis(motor, state_key, distance_mm):
     """One-shot relative move of Y/Z by distance_mm (signed), converted to
-    steps via the axis's LEAD (mm/screw-revolution) and STEPS_PER_REV.
-    Like HOME, requires the axis not already bouncing. Clamps the target to
-    MIN/MAX so it can't grind past a homed limit.
+    steps via the axis's LEAD (mm/screw-revolution) and its own configured
+    microsteps/rev (see steps_per_rev). Like HOME, requires the axis not
+    already bouncing. Clamps the target to MIN/MAX so it can't grind past
+    a homed limit.
     """
     st = state[state_key]
     if st["running"]:
         print(state_key.upper(), "MOVE: stop the axis first")
         return
 
-    steps_per_mm = STEPS_PER_REV / st["lead_mm"]
+    steps_per_mm = steps_per_rev(state_key) / st["lead_mm"]
     target_pos = st["pos"] + round(distance_mm * steps_per_mm)
     clamped_pos = max(st["min"], min(st["max"], target_pos))
     if clamped_pos != target_pos:
@@ -455,16 +507,17 @@ async def move_linear_axis(motor, state_key, distance_mm):
 
 async def rotate_x(degrees):
     """One-shot relative rotation of X by degrees (signed), converted to
-    steps via STEPS_PER_REV. X has no MIN/MAX (continuous rotation, no
-    fixed reference), so unlike move_linear_axis there's nothing to clamp
-    against. Requires the axis not already running.
+    steps via X's own configured microsteps/rev (see steps_per_rev). X has
+    no MIN/MAX (continuous rotation, no fixed reference), so unlike
+    move_linear_axis there's nothing to clamp against. Requires the axis
+    not already running.
     """
     st = state["x"]
     if st["running"]:
         print("X MOVE: stop the axis first")
         return
 
-    steps = round(abs(degrees) * STEPS_PER_REV / 360.0)
+    steps = round(abs(degrees) * steps_per_rev("x") / 360.0)
     if steps == 0:
         print("X MOVE: angle rounds to 0 steps, nothing to do")
         return
@@ -547,15 +600,19 @@ async def servo_task():
 
 def print_status():
     x, y, z, a = state["x"], state["y"], state["z"], state["a"]
-    print("X running=%s speed=%d dir=%s pos=%d (%.4gdeg)" %
+    print("X running=%s speed=%d dir=%s pos=%d (%.4gdeg) microsteps=%d current_ma=%d" %
           (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW",
-           x["pos"], x["pos"] * 360.0 / STEPS_PER_REV))
-    print("Y running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g" %
+           x["pos"], x["pos"] * 360.0 / steps_per_rev("x"), x["microsteps"], x["current_ma"]))
+    print("Y running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g "
+          "microsteps=%d current_ma=%d" %
           (y["running"], y["speed"], y["min"], y["max"], y["pos"],
-           y["pos"] * y["lead_mm"] / STEPS_PER_REV, y["sgthrs"], y["lead_mm"]))
-    print("Z running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g" %
+           y["pos"] * y["lead_mm"] / steps_per_rev("y"), y["sgthrs"], y["lead_mm"],
+           y["microsteps"], y["current_ma"]))
+    print("Z running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g "
+          "microsteps=%d current_ma=%d" %
           (z["running"], z["speed"], z["min"], z["max"], z["pos"],
-           z["pos"] * z["lead_mm"] / STEPS_PER_REV, z["sgthrs"], z["lead_mm"]))
+           z["pos"] * z["lead_mm"] / steps_per_rev("z"), z["sgthrs"], z["lead_mm"],
+           z["microsteps"], z["current_ma"]))
     try:
         a_pos_str = "%.4gdeg" % servo.read_position_deg()
     except OSError:
@@ -653,6 +710,15 @@ def _dispatch_command(line):
             persist = True  # checkpoint X/Y/Z's pos right away instead of waiting for autosave
         elif sub == "ZERO" and cmd in ("X", "Y", "Z"):
             zero_position(cmd.lower())
+            persist = True
+        elif sub == "MICROSTEPS" and len(parts) >= 3 and cmd in ("X", "Y", "Z"):
+            motor = {"X": x_motor, "Y": y_motor, "Z": z_motor}[cmd]
+            set_axis_microsteps(cmd.lower(), motor, int(parts[2]))
+            persist = True
+        elif sub == "CURRENT" and len(parts) >= 3 and cmd in ("X", "Y", "Z"):
+            motor = {"X": x_motor, "Y": y_motor, "Z": z_motor}[cmd]
+            axis["current_ma"] = int(parts[2])
+            motor.set_current(axis["current_ma"])
             persist = True
         elif sub == "TMC" and cmd in ("X", "Y", "Z"):
             motor = {"X": x_motor, "Y": y_motor, "Z": z_motor}[cmd]
