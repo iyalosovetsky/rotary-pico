@@ -19,8 +19,9 @@ MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
     X SPEED <steps_per_sec>     signed: sign sets direction, 0 = stopped
     X START [CW|CCW]           direction optional, defaults to CW (or last-used)
     X STOP
-    X MOVE <deg>                one-shot relative rotation (signed), axis must
-                                 be stopped first - see below
+    X MIN <deg>                 default 0 - see below
+    X MAX <deg>                 default 180 - see below
+    X MOVE <deg|MIN|MAX|MID>    one-shot move - see below
     X ZERO                      make the current position 0 - see below
     X MICROSTEPS <n>             256/128/64/32/16/8/4/2/1 - see below
     X CURRENT <mA>               run current - see below
@@ -70,11 +71,12 @@ floor here (not the doubled on-chip register comparison) and needs
 tuning by hand for your actual mechanics/speed.
 
 X/Y/Z ZERO does the same zeroing HOME does (current pos becomes 0,
-MIN/MAX shift to match), but instantly and wherever the axis currently
-is - no motion, no StallGuard involved. Use it to redefine the origin
-by hand instead of (or in addition to) a StallGuard-based HOME - e.g.
-X has no HOME at all (continuous rotation, nothing to stall against),
-so ZERO is the only way to give it a zero reference.
+MIN/MAX shift to match - in steps for Y/Z, in degrees for X), but
+instantly and wherever the axis currently is - no motion, no StallGuard
+involved. Use it to redefine the origin by hand instead of (or in
+addition to) a StallGuard-based HOME - e.g. X has no HOME at all
+(continuous rotation, nothing to stall against), so ZERO is the only
+way to give it a zero reference.
 
 X/Y/Z MICROSTEPS changes the driver's microstep resolution live (one of
 256/128/64/32/16/8/4/2/1) and persists it, same as the rig's old fixed
@@ -111,21 +113,19 @@ enough to act on).
 
 Y/Z MOVE takes a distance in millimeters, converted to steps via each
 axis's LEAD (mm per screw revolution) and its own configured
-MICROSTEPS. X MOVE takes an angle in degrees instead - X
-turns the turntable directly (no screw), so its position is naturally
-angular; it's converted to steps the same way, using degrees instead
-of mm/lead. Both are one-shot open-loop moves at the axis's configured
-SPEED, signed (direction), and require the axis not already
-START-ed/bouncing. Y/Z MOVE clamps the target to MIN/MAX so it can't
-grind past a homed limit; X has no MIN/MAX (continuous rotation, no
-fixed reference) so it isn't clamped.
+MICROSTEPS. X MOVE takes an angle in degrees instead - X turns the
+turntable directly (no screw), so its position is naturally angular;
+it's converted to steps the same way, using degrees instead of
+mm/lead. All three are one-shot open-loop moves at the axis's
+configured SPEED, signed (direction), and require the axis not already
+START-ed/bouncing. All three clamp the target to MIN/MAX (X's own
+MIN/MAX are in degrees, not steps - see the MIN/MAX commands above) so
+it can't run past a configured limit.
 
-Y/Z/A MOVE also accept MIN, MAX, or MID instead of a number - one-shot
+X/Y/Z/A MOVE also accept MIN, MAX, or MID instead of a number - one-shot
 absolute moves straight to that limit (or the midpoint between them),
 from wherever the axis currently is, rather than a signed distance
-from the current position. X has no MIN/MAX at all, so these don't
-apply to it - "X MOVE MIN" (etc.) is rejected outright instead of
-silently doing nothing.
+from the current position.
 
     A MIN <deg>
     A MAX <deg>
@@ -217,7 +217,12 @@ HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google
 HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SGTHRS, broken wiring)
 
 state = {
-    "x": {"running": False, "speed": 200, "pos": 0, "microsteps": 16, "current_ma": 800},
+    # X's MIN/MAX are in degrees (min_deg/max_deg, like A), not steps (unlike Y/Z's
+    # min/max) - X's natural unit is angular (MOVE already takes degrees for it), and
+    # degrees are resolution-independent, so a MICROSTEPS change doesn't need to
+    # rescale them the way Y/Z's step-based min/max does (see set_axis_microsteps).
+    "x": {"running": False, "speed": 200, "pos": 0, "microsteps": 16, "current_ma": 800,
+          "min_deg": 0.0, "max_deg": 180.0},
     "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
           "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
           "microsteps": 16, "current_ma": 800},
@@ -232,8 +237,8 @@ state = {
 # Only for plain value settings; not for START/STOP/ZERO/TMC/HOME/MOVE, which have
 # no bare-query meaning of their own. ----
 _QUERYABLE_FIELDS = {
-    "MIN": {"Y": "min", "Z": "min", "A": "min_deg"},
-    "MAX": {"Y": "max", "Z": "max", "A": "max_deg"},
+    "MIN": {"X": "min_deg", "Y": "min", "Z": "min", "A": "min_deg"},
+    "MAX": {"X": "max_deg", "Y": "max", "Z": "max", "A": "max_deg"},
     "SPEED": {"X": "speed", "Y": "speed", "Z": "speed", "A": "speed"},
     "SGTHRS": {"Y": "sgthrs", "Z": "sgthrs"},
     "MICROSTEPS": {"X": "microsteps", "Y": "microsteps", "Z": "microsteps"},
@@ -257,7 +262,7 @@ STALL_CONFIRM_COUNT = 3  # cheap insurance against a single noisy SG_RESULT samp
 # so there's nothing open-loop to track/persist for it. ----
 CONFIG_FILE = "rig_config.json"
 _PERSISTED_FIELDS = {
-    "x": ("speed", "pos", "microsteps", "current_ma"),
+    "x": ("speed", "pos", "microsteps", "current_ma", "min_deg", "max_deg"),
     "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
           "microsteps", "current_ma"),
     "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
@@ -370,15 +375,17 @@ async def bounce_task(motor, state_key):
 
 
 def zero_position(state_key):
-    """Redefines the axis's current pos as 0. For Y/Z, MIN/MAX shift by the
-    same offset so they keep representing the same real physical distance
-    from the (new) zero - the mechanism hasn't actually moved, only the
-    coordinate labels have. Used by both HOME (zeroes at the stall point)
+    """Redefines the axis's current pos as 0. For Y/Z, MIN/MAX (in steps)
+    shift by the same offset so they keep representing the same real
+    physical distance from the (new) zero - the mechanism hasn't actually
+    moved, only the coordinate labels have. For X, MIN_DEG/MAX_DEG (in
+    degrees) shift by that same offset converted to degrees, same
+    reasoning. Used by both HOME (zeroes at the stall point, Y/Z only)
     and the standalone ZERO command (zeroes wherever the axis is right
-    now). Safe to call while the axis is running: it only touches state
-    dict entries, no motor I/O, and (uasyncio being cooperative) nothing
-    else runs until this function returns, so bounce_task/x_task can't
-    observe a half-shifted state.
+    now, X/Y/Z). Safe to call while the axis is running: it only touches
+    state dict entries, no motor I/O, and (uasyncio being cooperative)
+    nothing else runs until this function returns, so bounce_task/x_task
+    can't observe a half-shifted state.
     """
     st = state[state_key]
     offset = st["pos"]
@@ -387,6 +394,10 @@ def zero_position(state_key):
         st["min"] -= offset
     if "max" in st:
         st["max"] -= offset
+    if "min_deg" in st and state_key != "a":
+        offset_deg = offset * 360.0 / steps_per_rev(state_key)
+        st["min_deg"] -= offset_deg
+        st["max_deg"] -= offset_deg
 
 
 def set_axis_microsteps(state_key, motor, new_microsteps):
@@ -570,21 +581,29 @@ async def move_linear_axis_to(motor, state_key, pseudo):
 
 async def rotate_x(degrees):
     """One-shot relative rotation of X by degrees (signed), converted to
-    steps via X's own configured microsteps/rev (see steps_per_rev). X has
-    no MIN/MAX (continuous rotation, no fixed reference), so unlike
-    move_linear_axis there's nothing to clamp against. Requires the axis
-    not already running.
+    steps via X's own configured microsteps/rev (see steps_per_rev).
+    Clamped to MIN_DEG/MAX_DEG (converted to steps), same idea as
+    move_linear_axis's clamp to MIN/MAX - see the state dict comment on
+    why X's bounds are kept in degrees rather than steps. Requires the
+    axis not already running.
     """
     st = state["x"]
     if st["running"]:
         print("X MOVE: stop the axis first")
         return
 
-    steps = round(abs(degrees) * steps_per_rev("x") / 360.0)
+    steps_per_deg = steps_per_rev("x") / 360.0
+    target_pos = st["pos"] + round(degrees * steps_per_deg)
+    min_pos = round(st["min_deg"] * steps_per_deg)
+    max_pos = round(st["max_deg"] * steps_per_deg)
+    clamped_pos = max(min_pos, min(max_pos, target_pos))
+    if clamped_pos != target_pos:
+        print("X MOVE: clamped to MIN/MAX (%d instead of %d)" % (clamped_pos, target_pos))
+    steps = abs(clamped_pos - st["pos"])
     if steps == 0:
         print("X MOVE: angle rounds to 0 steps, nothing to do")
         return
-    direction = 1 if degrees > 0 else -1
+    direction = 1 if clamped_pos > st["pos"] else -1
 
     speed = max(1, abs(st["speed"]) or 200)
     period_ms = max(1, int(1000 / speed))
@@ -596,6 +615,44 @@ async def rotate_x(degrees):
         await asyncio.sleep_ms(period_ms)
         st["pos"] += direction
     print("X moved %.4g deg (%d steps), pos=%d" % (degrees, steps, st["pos"]))
+
+
+async def rotate_x_to(pseudo):
+    """One-shot absolute rotation of X to a named pseudo-position: MIN,
+    MAX, or MID (the midpoint between them) - see PSEUDO_POSITIONS, in
+    degrees (MIN_DEG/MAX_DEG). Unlike rotate_x's signed relative angle,
+    this goes straight to that angle from wherever the axis currently is.
+    Requires the axis not already running.
+    """
+    st = state["x"]
+    if st["running"]:
+        print("X MOVE: stop the axis first")
+        return
+
+    if pseudo == "MIN":
+        target_deg = st["min_deg"]
+    elif pseudo == "MAX":
+        target_deg = st["max_deg"]
+    else:
+        target_deg = (st["min_deg"] + st["max_deg"]) / 2.0
+    target_pos = round(target_deg * steps_per_rev("x") / 360.0)
+
+    steps = abs(target_pos - st["pos"])
+    if steps == 0:
+        print("X MOVE: already at", pseudo)
+        return
+    direction = 1 if target_pos > st["pos"] else -1
+
+    speed = max(1, abs(st["speed"]) or 200)
+    period_ms = max(1, int(1000 / speed))
+    x_motor.dir.value(1 if direction > 0 else 0)
+    for _ in range(steps):
+        x_motor.step.value(1)
+        time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
+        x_motor.step.value(0)
+        await asyncio.sleep_ms(period_ms)
+        st["pos"] += direction
+    print("X moved to", pseudo, "(%d steps), pos=%d" % (steps, st["pos"]))
 
 
 def move_servo(delta_deg):
@@ -685,9 +742,11 @@ async def servo_task():
 
 def print_status():
     x, y, z, a = state["x"], state["y"], state["z"], state["a"]
-    print("X running=%s speed=%d dir=%s pos=%d (%.4gdeg) microsteps=%d current_ma=%d" %
+    print("X running=%s speed=%d dir=%s pos=%d (%.4gdeg) min_deg=%.4g max_deg=%.4g "
+          "microsteps=%d current_ma=%d" %
           (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW",
-           x["pos"], x["pos"] * 360.0 / steps_per_rev("x"), x["microsteps"], x["current_ma"]))
+           x["pos"], x["pos"] * 360.0 / steps_per_rev("x"), x["min_deg"], x["max_deg"],
+           x["microsteps"], x["current_ma"]))
     print("Y running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g "
           "microsteps=%d current_ma=%d" %
           (y["running"], y["speed"], y["min"], y["max"], y["pos"],
@@ -838,10 +897,11 @@ def _dispatch_command(line):
             else:
                 asyncio.create_task(move_linear_axis(motor, cmd.lower(), float(parts[2])))
         elif sub == "MOVE" and len(parts) >= 3 and cmd == "X":
-            if parts[2].upper() in PSEUDO_POSITIONS:
-                print("? X has no MIN/MAX (continuous rotation) - MIN/MAX/MID don't apply:", line)
-                return
-            asyncio.create_task(rotate_x(float(parts[2])))
+            target = parts[2].upper()
+            if target in PSEUDO_POSITIONS:
+                asyncio.create_task(rotate_x_to(target))
+            else:
+                asyncio.create_task(rotate_x(float(parts[2])))
         elif sub == "MOVE" and len(parts) >= 3 and cmd == "A":
             target = parts[2].upper()
             if target in PSEUDO_POSITIONS:
@@ -859,10 +919,10 @@ def _dispatch_command(line):
                 persist = True
             motor = y_motor if cmd == "Y" else z_motor
             asyncio.create_task(home_axis(motor, cmd.lower()))
-        elif sub == "MIN" and len(parts) >= 3 and cmd == "A":
+        elif sub == "MIN" and len(parts) >= 3 and cmd in ("X", "A"):
             axis["min_deg"] = float(parts[2])
             persist = True
-        elif sub == "MAX" and len(parts) >= 3 and cmd == "A":
+        elif sub == "MAX" and len(parts) >= 3 and cmd in ("X", "A"):
             axis["max_deg"] = float(parts[2])
             persist = True
         else:
