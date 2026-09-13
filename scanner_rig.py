@@ -118,14 +118,17 @@ turntable directly (no screw), so its position is naturally angular;
 it's converted to steps the same way, using degrees instead of
 mm/lead. All three are one-shot open-loop moves at the axis's
 configured SPEED, signed (direction), and require the axis not already
-START-ed/bouncing. All three clamp the target to MIN/MAX (X's own
-MIN/MAX are in degrees, not steps - see the MIN/MAX commands above) so
-it can't run past a configured limit.
+START-ed/bouncing. Y/Z MOVE clamps the target to MIN/MAX so it can't
+grind past a configured limit; a plain numeric X MOVE is deliberately
+NOT clamped to its MIN_DEG/MAX_DEG - X is continuous rotation, and
+multi-revolution moves like "X MOVE 720" (two full turns) are a
+legitimate use case MIN/MAX would only get in the way of.
 
 X/Y/Z/A MOVE also accept MIN, MAX, or MID instead of a number - one-shot
 absolute moves straight to that limit (or the midpoint between them),
 from wherever the axis currently is, rather than a signed distance
-from the current position.
+from the current position. This is the only thing X's MIN_DEG/MAX_DEG
+(default 0/180, so MID = 90) are used for.
 
     A MIN <deg>
     A MAX <deg>
@@ -581,29 +584,24 @@ async def move_linear_axis_to(motor, state_key, pseudo):
 
 async def rotate_x(degrees):
     """One-shot relative rotation of X by degrees (signed), converted to
-    steps via X's own configured microsteps/rev (see steps_per_rev).
-    Clamped to MIN_DEG/MAX_DEG (converted to steps), same idea as
-    move_linear_axis's clamp to MIN/MAX - see the state dict comment on
-    why X's bounds are kept in degrees rather than steps. Requires the
-    axis not already running.
+    steps via X's own configured microsteps/rev (see steps_per_rev). NOT
+    clamped to MIN_DEG/MAX_DEG - unlike Y/Z MOVE, a plain numeric X MOVE
+    is deliberately unbounded, since X is continuous rotation and
+    multi-revolution moves (e.g. "X MOVE 720" for two full turns) are a
+    legitimate use case; MIN_DEG/MAX_DEG only matter for the MIN/MAX/MID
+    pseudo-positions (see rotate_x_to). Requires the axis not already
+    running.
     """
     st = state["x"]
     if st["running"]:
         print("X MOVE: stop the axis first")
         return
 
-    steps_per_deg = steps_per_rev("x") / 360.0
-    target_pos = st["pos"] + round(degrees * steps_per_deg)
-    min_pos = round(st["min_deg"] * steps_per_deg)
-    max_pos = round(st["max_deg"] * steps_per_deg)
-    clamped_pos = max(min_pos, min(max_pos, target_pos))
-    if clamped_pos != target_pos:
-        print("X MOVE: clamped to MIN/MAX (%d instead of %d)" % (clamped_pos, target_pos))
-    steps = abs(clamped_pos - st["pos"])
+    steps = round(abs(degrees) * steps_per_rev("x") / 360.0)
     if steps == 0:
         print("X MOVE: angle rounds to 0 steps, nothing to do")
         return
-    direction = 1 if clamped_pos > st["pos"] else -1
+    direction = 1 if degrees > 0 else -1
 
     speed = max(1, abs(st["speed"]) or 200)
     period_ms = max(1, int(1000 / speed))
