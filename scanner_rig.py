@@ -32,7 +32,7 @@ MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
     Y SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Y HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
     Y LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
-    Y MOVE <mm>                 one-shot relative move (signed) - see below
+    Y MOVE <mm|MIN|MAX|MID>     one-shot move - see below
     Y ZERO                      make the current position 0 - see below
     Y MICROSTEPS <n>             256/128/64/32/16/8/4/2/1 - see below
     Y CURRENT <mA>               run current - see below
@@ -46,7 +46,7 @@ MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
     Z SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Z HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
     Z LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
-    Z MOVE <mm>                 one-shot relative move (signed) - see below
+    Z MOVE <mm|MIN|MAX|MID>     one-shot move - see below
     Z ZERO                      make the current position 0 - see below
     Z MICROSTEPS <n>             256/128/64/32/16/8/4/2/1 - see below
     Z CURRENT <mA>               run current - see below
@@ -120,14 +120,21 @@ START-ed/bouncing. Y/Z MOVE clamps the target to MIN/MAX so it can't
 grind past a homed limit; X has no MIN/MAX (continuous rotation, no
 fixed reference) so it isn't clamped.
 
+Y/Z/A MOVE also accept MIN, MAX, or MID instead of a number - one-shot
+absolute moves straight to that limit (or the midpoint between them),
+from wherever the axis currently is, rather than a signed distance
+from the current position. X has no MIN/MAX at all, so these don't
+apply to it - "X MOVE MIN" (etc.) is rejected outright instead of
+silently doing nothing.
+
     A MIN <deg>
     A MAX <deg>
     A SPEED <raw_units>         servo-internal speed register, try 0-1000
-    A MOVE <deg>                one-shot relative move (signed), axis must
-                                 be stopped first - like Y/Z MOVE but in
-                                 degrees, using the servo's own absolute
-                                 position feedback instead of open-loop
-                                 step counting; clamped to MIN/MAX
+    A MOVE <deg|MIN|MAX|MID>    one-shot move, axis must be stopped first -
+                                 like Y/Z MOVE but in degrees, using the
+                                 servo's own absolute position feedback
+                                 instead of open-loop step counting;
+                                 <deg> is relative and clamped to MIN/MAX
     A TMC                       servo health (voltage/temp/load/current) - see below
     A START
     A STOP
@@ -521,6 +528,46 @@ async def move_linear_axis(motor, state_key, distance_mm):
     print(state_key.upper(), "moved %.4gmm (%d steps), pos=%d" % (distance_mm, steps, st["pos"]))
 
 
+PSEUDO_POSITIONS = ("MIN", "MAX", "MID")
+
+
+async def move_linear_axis_to(motor, state_key, pseudo):
+    """One-shot absolute move of Y/Z to a named pseudo-position: MIN, MAX,
+    or MID (the midpoint between them) - see PSEUDO_POSITIONS. Unlike
+    move_linear_axis's signed relative distance in mm, this goes straight
+    to that position from wherever the axis currently is. Requires the
+    axis not already bouncing.
+    """
+    st = state[state_key]
+    if st["running"]:
+        print(state_key.upper(), "MOVE: stop the axis first")
+        return
+
+    if pseudo == "MIN":
+        target_pos = st["min"]
+    elif pseudo == "MAX":
+        target_pos = st["max"]
+    else:
+        target_pos = round((st["min"] + st["max"]) / 2)
+
+    steps = abs(target_pos - st["pos"])
+    if steps == 0:
+        print(state_key.upper(), "MOVE: already at", pseudo)
+        return
+    direction = 1 if target_pos > st["pos"] else -1
+
+    speed = max(1, abs(st["speed"]))
+    period_ms = max(1, int(1000 / speed))
+    motor.dir.value(1 if direction > 0 else 0)
+    for _ in range(steps):
+        motor.step.value(1)
+        time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
+        motor.step.value(0)
+        await asyncio.sleep_ms(period_ms)
+        st["pos"] += direction
+    print(state_key.upper(), "moved to", pseudo, "(%d steps), pos=%d" % (steps, st["pos"]))
+
+
 async def rotate_x(degrees):
     """One-shot relative rotation of X by degrees (signed), converted to
     steps via X's own configured microsteps/rev (see steps_per_rev). X has
@@ -574,6 +621,28 @@ def move_servo(delta_deg):
         print("A MOVE: clamped to MIN/MAX (%.4g instead of %.4g)" % (clamped_deg, target_deg))
     servo.set_goal_deg(clamped_deg, speed=st["speed"])
     print("A moving %.4g -> %.4g deg" % (current_deg, clamped_deg))
+
+
+def move_servo_to(pseudo):
+    """One-shot absolute move of A to a named pseudo-position: MIN, MAX, or
+    MID (the midpoint between them) - see PSEUDO_POSITIONS. Unlike
+    move_servo's relative delta, the target doesn't depend on the current
+    position, so there's no need to read it back first. Requires the axis
+    not already bouncing.
+    """
+    st = state["a"]
+    if st["running"]:
+        print("A MOVE: stop the axis first")
+        return
+
+    if pseudo == "MIN":
+        target_deg = st["min_deg"]
+    elif pseudo == "MAX":
+        target_deg = st["max_deg"]
+    else:
+        target_deg = (st["min_deg"] + st["max_deg"]) / 2.0
+    servo.set_goal_deg(target_deg, speed=st["speed"])
+    print("A moving to", pseudo, "(%.4g deg)" % target_deg)
 
 
 POSITION_AUTOSAVE_INTERVAL_S = 10  # how often X/Y/Z's open-loop "pos" is checkpointed to
@@ -763,11 +832,22 @@ def _dispatch_command(line):
             persist = True
         elif sub == "MOVE" and len(parts) >= 3 and cmd in ("Y", "Z"):
             motor = y_motor if cmd == "Y" else z_motor
-            asyncio.create_task(move_linear_axis(motor, cmd.lower(), float(parts[2])))
+            target = parts[2].upper()
+            if target in PSEUDO_POSITIONS:
+                asyncio.create_task(move_linear_axis_to(motor, cmd.lower(), target))
+            else:
+                asyncio.create_task(move_linear_axis(motor, cmd.lower(), float(parts[2])))
         elif sub == "MOVE" and len(parts) >= 3 and cmd == "X":
+            if parts[2].upper() in PSEUDO_POSITIONS:
+                print("? X has no MIN/MAX (continuous rotation) - MIN/MAX/MID don't apply:", line)
+                return
             asyncio.create_task(rotate_x(float(parts[2])))
         elif sub == "MOVE" and len(parts) >= 3 and cmd == "A":
-            move_servo(float(parts[2]))
+            target = parts[2].upper()
+            if target in PSEUDO_POSITIONS:
+                move_servo_to(target)
+            else:
+                move_servo(float(parts[2]))
         elif sub == "HOME" and cmd in ("Y", "Z"):
             idx = 2
             if len(parts) > idx and parts[idx].upper() in ("DEC", "INC"):
