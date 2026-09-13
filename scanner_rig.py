@@ -8,6 +8,9 @@ Raptor-style 3D scanner rig.
 
 Console commands (G-code-like, one per line):
 
+MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
+"Y MIN 0") prints that field's current value instead of setting it.
+
     START [minutes]             start ALL axes at once, auto-stop after
                                  [minutes] (default 5) using each axis's
                                  already-configured SPEED/MIN/MAX/etc
@@ -215,6 +218,19 @@ state = {
           "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
           "microsteps": 16, "current_ma": 800},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
+}
+
+# ---- "<axis> <SUB>" with no value queries that field's current value instead of
+# setting it (e.g. "Y MIN" prints Y's min) - maps sub-command -> {cmd: state field}.
+# Only for plain value settings; not for START/STOP/ZERO/TMC/HOME/MOVE, which have
+# no bare-query meaning of their own. ----
+_QUERYABLE_FIELDS = {
+    "MIN": {"Y": "min", "Z": "min", "A": "min_deg"},
+    "MAX": {"Y": "max", "Z": "max", "A": "max_deg"},
+    "SPEED": {"X": "speed", "Y": "speed", "Z": "speed", "A": "speed"},
+    "SGTHRS": {"Y": "sgthrs", "Z": "sgthrs"},
+    "MICROSTEPS": {"X": "microsteps", "Y": "microsteps", "Z": "microsteps"},
+    "CURRENT": {"X": "current_ma", "Y": "current_ma", "Z": "current_ma"},
 }
 
 RAMP_START_SPEED = 100  # steps/sec - gentle starting speed for home_axis's ramp-up
@@ -689,6 +705,11 @@ def _dispatch_command(line):
 
     sub = parts[1].upper()
     axis = {"X": state["x"], "Y": state["y"], "Z": state["z"], "A": state["a"]}[cmd]
+
+    if len(parts) == 2 and sub in _QUERYABLE_FIELDS and cmd in _QUERYABLE_FIELDS[sub]:
+        field = _QUERYABLE_FIELDS[sub][cmd]
+        print("%s %s = %s" % (cmd, sub, axis[field]))
+        return
 
     persist = False
     try:
