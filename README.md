@@ -47,6 +47,10 @@ Commands are sent one per line over the console (REPL):
 | `X START [CW\|CCW]` | Start table rotation - direction optional, defaults to CW (or last-used) |
 | `X STOP` | Stop table rotation |
 | `X MOVE <deg>` | One-shot relative rotation by a signed angle - axis must be stopped first |
+| `X ZERO` | Make the current position 0 (see below) |
+| `X MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
+| `X CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
+| `X TMC` | TMC2209 driver health: faults, live current, microsteps, mode (see below) |
 | `Y MIN <steps>` | Lower limit of carriage travel (microsteps) |
 | `Y MAX <steps>` | Upper limit of carriage travel (microsteps) |
 | `Y SPEED <steps_per_sec>` | Carriage speed |
@@ -54,6 +58,10 @@ Commands are sent one per line over the console (REPL):
 | `Y HOME [DEC\|INC] [speed]` | One-shot calibration: home toward a StallGuard stall (see below) |
 | `Y LEAD <mm>` | Lead screw pitch (mm per screw revolution) - used to convert `MOVE`'s millimeters to steps |
 | `Y MOVE <mm>` | One-shot relative move by a signed distance in mm - axis must be stopped first, clamped to `MIN`/`MAX` |
+| `Y ZERO` | Make the current position 0 (see below) |
+| `Y MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
+| `Y CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
+| `Y TMC` | TMC2209 driver health: faults, live current, microsteps, mode (see below) |
 | `Y START` | Start cyclic motion between `MIN` and `MAX` |
 | `Y STOP` | Stop the carriage |
 | `Z MIN <steps>` | Lower limit of Z travel (microsteps) |
@@ -63,12 +71,17 @@ Commands are sent one per line over the console (REPL):
 | `Z HOME [DEC\|INC] [speed]` | One-shot calibration: home toward a StallGuard stall (see below) |
 | `Z LEAD <mm>` | Lead screw pitch (mm per screw revolution) - used to convert `MOVE`'s millimeters to steps |
 | `Z MOVE <mm>` | One-shot relative move by a signed distance in mm - axis must be stopped first, clamped to `MIN`/`MAX` |
+| `Z ZERO` | Make the current position 0 (see below) |
+| `Z MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
+| `Z CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
+| `Z TMC` | TMC2209 driver health: faults, live current, microsteps, mode (see below) |
 | `Z START` | Start cyclic motion between `MIN` and `MAX` |
 | `Z STOP` | Stop the Z axis |
 | `A MIN <deg>` | Minimum scanner tilt angle (degrees) |
 | `A MAX <deg>` | Maximum scanner tilt angle (degrees) |
 | `A SPEED <raw_units>` | Servo speed (raw register units, tune empirically) |
 | `A MOVE <deg>` | One-shot relative move by a signed angle - axis must be stopped first, clamped to `MIN`/`MAX` |
+| `A TMC` | Servo health: voltage, temperature, load, current, error flags (see below) |
 | `A START` | Start cyclic tilt between `MIN` and `MAX` |
 | `A STOP` | Stop the servo |
 | `STATUS` | Current position and config of all four axes (X/Y/Z in steps + degrees/mm, A read live from the servo) |
@@ -115,11 +128,27 @@ This is a one-shot calibration - run `HOME` once before the first `START`, the w
 2. If it stops almost immediately (before reaching the real limit), lower `SGTHRS` further isn't the fix - it likely means the axis hasn't ramped up to a speed where StallGuard's reading is meaningful yet; check `HOME`'s speed argument.
 3. If `HOME` fails with "StallGuard never tripped", raise `SGTHRS` until it reliably trips right at the real mechanical limit, not before.
 
+### Zeroing the origin (ZERO)
+
+`X`/`Y`/`Z ZERO` does the same zeroing `HOME` does (current position becomes 0, `MIN`/`MAX` shift by the same offset so they keep meaning the same real distance from the new origin) but instantly, wherever the axis currently is - no motion, no StallGuard involved. Use it to redefine the origin by hand instead of (or in addition to) a StallGuard-based `HOME`. X has no `HOME` at all (continuous rotation, nothing to stall against), so `ZERO` is its only way to get a zero reference.
+
 ### Physical-unit positioning (LEAD, MOVE)
 
-`Y`/`Z MOVE` takes a distance in millimeters, converted to motor steps via that axis's `LEAD` (millimeters per lead-screw revolution - depends on your actual hardware, so it's configurable, default 4mm) and the firmware's fixed motor/microstep count. `X MOVE` takes an angle in degrees instead, since X turns the turntable directly rather than driving a screw. `A MOVE` also takes degrees, but unlike the open-loop stepper axes, it reads the servo's own absolute position feedback and issues a single absolute goal instead of counting steps.
+`Y`/`Z MOVE` takes a distance in millimeters, converted to motor steps via that axis's `LEAD` (millimeters per lead-screw revolution - depends on your actual hardware, so it's configurable, default 4mm) and that axis's own `MICROSTEPS` setting (see below). `X MOVE` takes an angle in degrees instead, since X turns the turntable directly rather than driving a screw. `A MOVE` also takes degrees, but unlike the open-loop stepper axes, it reads the servo's own absolute position feedback and issues a single absolute goal instead of counting steps.
 
 All four `MOVE` commands are one-shot and relative (signed, from the current position), require the axis not already running/bouncing, and (except X, which has no fixed reference to clamp against) clamp their target to `MIN`/`MAX` so they can't grind past a homed limit.
+
+### Microstepping and current (MICROSTEPS, CURRENT)
+
+Each of X/Y/Z has its own configurable `MICROSTEPS` (one of 256/128/64/32/16/8/4/2/1, default 16) and `CURRENT` (run current in mA - hold current is always auto-derived as half of it), persisted independently per axis. Changing `MICROSTEPS` rescales `pos`/`MIN`/`MAX` by the resolution ratio (e.g. 16→32 doubles them): a single step means a different real distance at a different resolution, so without rescaling, an existing `HOME` calibration would silently stop matching reality instead of just needing conversion. `CURRENT` is independent of `HOME_CURRENT_MA` in `scanner_rig.py`, which only applies transiently during the `HOME` move itself and is restored to this per-axis `CURRENT` afterward.
+
+### Driver/servo health (TMC)
+
+`X`/`Y`/`Z TMC` decodes that TMC2209's GSTAT/DRV_STATUS registers into a one-line health summary: `OK`, or `ERROR(...)` listing any of `RESET`/`DRV_ERR`/`UV_CP` (GSTAT) or `OTPW`/`OT`/`S2GA`/`S2GB`/`S2VSA`/`S2VSB`/`OLA`/`OLB` (DRV_STATUS) that are set, plus the driver's live actual current in mA, its microsteps (read back from the chip, not assumed), mode (stealthChop/spreadCycle), standstill, and - for Y/Z - `sgthrs=N(cfg)` (SGTHRS can't be read back from this chip, so this echoes the last value configured in software, not a hardware readback). `RESET` is expected once right after power-up; GSTAT is cleared on each read so it doesn't keep reporting an old event. See [TMC2209_REGISTERS.md](TMC2209_REGISTERS.md) for the full register/bit reference.
+
+`A TMC` reads the ST3215's own feedback registers (voltage, temperature, load, current) plus the status/error byte every reply carries, decoded the same way: `OK`, or `ERROR(...)` listing any of `VOLTAGE`/`ANGLE`/`OVERHEAT`/`OVERELE`/`OVERLOAD`. `load` is a raw signed magnitude, not a calibrated percentage - see [ST3215_REGISTERS.md](ST3215_REGISTERS.md).
+
+Both are useful for catching a motor/servo that's silently drawing less current or running hotter than expected, without pulling a multimeter.
 
 ### Position tracking
 
