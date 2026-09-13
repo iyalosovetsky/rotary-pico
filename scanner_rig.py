@@ -102,8 +102,16 @@ fixed reference) so it isn't clamped.
                                  degrees, using the servo's own absolute
                                  position feedback instead of open-loop
                                  step counting; clamped to MIN/MAX
+    A TMC                       servo health (voltage/temp/load/current) - see below
     A START
     A STOP
+
+A TMC reads the ST3215's own feedback registers (voltage, temperature,
+load, current) plus the status/error byte that comes back with every
+reply, decoded the same way X/Y/Z TMC reports ERROR(...) flags: OK, or
+ERROR(...) listing any of VOLTAGE/ANGLE/OVERHEAT/OVERELE/OVERLOAD
+that are set. load is a raw signed magnitude (not a calibrated
+percentage - the servo's own docs don't pin that down precisely).
 
     STATUS                      shows every axis's current position (X/Y/Z in
                                  steps + degrees/mm, A read live from the servo)
@@ -644,6 +652,8 @@ def _dispatch_command(line):
         elif sub == "TMC" and cmd in ("X", "Y", "Z"):
             motor = {"X": x_motor, "Y": y_motor, "Z": z_motor}[cmd]
             print(cmd, "TMC:", motor.diag_summary())
+        elif sub == "TMC" and cmd == "A":
+            print("A TMC:", servo.diag_summary())
         elif sub == "SPEED" and len(parts) >= 3:
             axis["speed"] = int(parts[2])
             persist = True

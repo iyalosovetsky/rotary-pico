@@ -75,7 +75,11 @@ ADDR_GOAL_POSITION_L = 42
 ADDR_GOAL_TIME_L = 44
 ADDR_GOAL_SPEED_L = 46
 ADDR_PRESENT_POSITION_L = 56
+ADDR_PRESENT_LOAD_L = 60
+ADDR_PRESENT_VOLTAGE = 62
+ADDR_PRESENT_TEMPERATURE = 63
 ADDR_MOVING = 66
+ADDR_PRESENT_CURRENT_L = 69
 
 UNITS_PER_REV = 4096  # 12-bit position, 360 degrees full turn
 
@@ -234,3 +238,60 @@ class ST3215:
     def is_moving(self):
         raw = self.bus.read(self.id, ADDR_MOVING, 1)
         return raw[0] != 0
+
+    def read_voltage(self):
+        """Present_Voltage (addr 62, 1 byte): raw * 0.1 = volts (per the
+        official Feetech SMS/STS register table)."""
+        return self.bus.read(self.id, ADDR_PRESENT_VOLTAGE, 1)[0] * 0.1
+
+    def read_temperature(self):
+        """Present_Temperature (addr 63, 1 byte): raw value is already deg C."""
+        return self.bus.read(self.id, ADDR_PRESENT_TEMPERATURE, 1)[0]
+
+    def read_load(self):
+        """Present_Load (addr 60-61, 2 bytes): bits 0-9 magnitude, bit 10
+        direction (per the official register table). Returned as a signed
+        raw magnitude (negative = opposite direction) - not independently
+        confirmed as a percentage, so left unscaled rather than guessing."""
+        raw = self.bus.read(self.id, ADDR_PRESENT_LOAD_L, 2)
+        value = raw[0] | (raw[1] << 8)
+        magnitude = value & 0x3FF
+        return -magnitude if (value & 0x400) else magnitude
+
+    def read_current_ma(self):
+        """Present_Current (addr 69-70, 2 bytes): raw * 6.5 = mA (per the
+        official Feetech SMS/STS register table)."""
+        raw = self.bus.read(self.id, ADDR_PRESENT_CURRENT_L, 2)
+        return (raw[0] | (raw[1] << 8)) * 6.5
+
+    def diag_summary(self):
+        """Human-readable servo health check: voltage/temperature/load/
+        current plus the protocol status/error byte that comes back with
+        every reply (see ERRBIT_* above) - decoded the same way the
+        TMC2209 driver's diag_summary() reports ERROR(...) flags, for a
+        consistent "<axis> TMC" command across every axis. Meant for an
+        interactive console status command, not programmatic decisions.
+        """
+        data, result, error = self.bus.read_status(self.id, ADDR_PRESENT_VOLTAGE, 1)
+        if result != COMM_SUCCESS:
+            return "no reply (%s)" % get_result_text(result)
+        voltage = data[0] * 0.1
+        temperature = self.read_temperature()
+        load = self.read_load()
+        current_ma = self.read_current_ma()
+        moving = "yes" if self.is_moving() else "no"
+
+        flags = []
+        if error & ERRBIT_VOLTAGE:
+            flags.append("VOLTAGE")
+        if error & ERRBIT_ANGLE:
+            flags.append("ANGLE")
+        if error & ERRBIT_OVERHEAT:
+            flags.append("OVERHEAT")
+        if error & ERRBIT_OVERELE:
+            flags.append("OVERELE")
+        if error & ERRBIT_OVERLOAD:
+            flags.append("OVERLOAD")
+        status = "OK" if not flags else "ERROR(%s)" % ",".join(flags)
+        return "%s voltage=%.3gV temp=%dC load=%d current=%.4gmA moving=%s" % (
+            status, voltage, temperature, load, current_ma, moving)
