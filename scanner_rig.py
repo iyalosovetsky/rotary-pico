@@ -80,8 +80,16 @@ fixed reference) so it isn't clamped.
     A START
     A STOP
 
-    STATUS
+    STATUS                      shows every axis's current position (X/Y/Z in
+                                 steps + degrees/mm, A read live from the servo)
+                                 alongside its config
     HELP
+
+X/Y/Z have no position sensor - "pos" is just an open-loop step count,
+so it's checkpointed to rig_config.json periodically while moving (see
+POSITION_AUTOSAVE_INTERVAL_S) and immediately on STOP, to survive a
+reboot. A doesn't need this: the ST3215 servo always reports its own
+true absolute angle over UART, so STATUS just reads it live instead.
 
 Rename this file to main.py once you're happy with it, to have it run
 on boot. Left as scanner_rig.py for now so it doesn't clobber the
@@ -137,7 +145,7 @@ HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google
 HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SGTHRS, broken wiring)
 
 state = {
-    "x": {"running": False, "speed": 200},
+    "x": {"running": False, "speed": 200, "pos": 0},
     "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
           "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0},
     "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
@@ -153,12 +161,18 @@ STALL_SETTLE_STEPS = 40  # SG_RESULT isn't meaningful until the motor has been m
 STALL_CONFIRM_COUNT = 3  # cheap insurance against a single noisy SG_RESULT sample -
                           # require this many consecutive ~100ms checks below SGTHRS
 
-# ---- persisted MIN/MAX/SPEED/SGTHRS/HOME_*, saved to/loaded from a file at the board root ----
+# ---- persisted MIN/MAX/SPEED/SGTHRS/HOME_*/POS, saved to/loaded from a file at the board root.
+# X/Y/Z's "pos" is the only thing here that isn't a user-set config value - it's the open-loop
+# step counter (no position sensor on these axes), persisted so a reboot doesn't forget where
+# the mechanism physically is. It's NOT saved on every step (see position_autosave_task) - only
+# periodically and at deliberate stops, to avoid hammering the flash. A has no "pos" here: the
+# ST3215 servo reports its own true absolute position over UART at any time (read_position_deg),
+# so there's nothing open-loop to track/persist for it. ----
 CONFIG_FILE = "rig_config.json"
 _PERSISTED_FIELDS = {
-    "x": ("speed",),
-    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm"),
-    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm"),
+    "x": ("speed", "pos"),
+    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos"),
+    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos"),
     "a": ("min_deg", "max_deg", "speed"),
 }
 
@@ -232,6 +246,7 @@ async def x_task():
             x_motor.step.value(0)
             period_ms = max(1, int(1000 / abs(st["speed"])))  # uasyncio here has no sleep_us
             await asyncio.sleep_ms(period_ms)
+            st["pos"] += 1 if st["speed"] > 0 else -1
         else:
             await asyncio.sleep_ms(20)
 
@@ -402,7 +417,8 @@ async def rotate_x(degrees):
         time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
         x_motor.step.value(0)
         await asyncio.sleep_ms(period_ms)
-    print("X moved %.4g deg (%d steps)" % (degrees, steps))
+        st["pos"] += direction
+    print("X moved %.4g deg (%d steps), pos=%d" % (degrees, steps, st["pos"]))
 
 
 def move_servo(delta_deg):
@@ -430,6 +446,23 @@ def move_servo(delta_deg):
     print("A moving %.4g -> %.4g deg" % (current_deg, clamped_deg))
 
 
+POSITION_AUTOSAVE_INTERVAL_S = 10  # how often X/Y/Z's open-loop "pos" is checkpointed to
+                                    # flash while it's actually changing (bouncing, spinning,
+                                    # or mid-MOVE) - bounds how much a power cut can lose,
+                                    # without writing to flash on every single step
+
+
+async def position_autosave_task():
+    last_saved = {key: state[key]["pos"] for key in ("x", "y", "z")}
+    while True:
+        await asyncio.sleep(POSITION_AUTOSAVE_INTERVAL_S)
+        changed = {key: state[key]["pos"] for key in ("x", "y", "z")
+                   if state[key]["pos"] != last_saved[key]}
+        if changed:
+            save_config()
+            last_saved.update(changed)
+
+
 async def servo_task():
     going_to_max = True
     while True:
@@ -453,14 +486,21 @@ async def servo_task():
 
 def print_status():
     x, y, z, a = state["x"], state["y"], state["z"], state["a"]
-    print("X running=%s speed=%d dir=%s" %
-          (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW"))
-    print("Y running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d lead_mm=%.4g" %
-          (y["running"], y["speed"], y["min"], y["max"], y["pos"], y["sgthrs"], y["lead_mm"]))
-    print("Z running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d lead_mm=%.4g" %
-          (z["running"], z["speed"], z["min"], z["max"], z["pos"], z["sgthrs"], z["lead_mm"]))
-    print("A running=%s speed=%d min_deg=%d max_deg=%d" %
-          (a["running"], a["speed"], a["min_deg"], a["max_deg"]))
+    print("X running=%s speed=%d dir=%s pos=%d (%.4gdeg)" %
+          (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW",
+           x["pos"], x["pos"] * 360.0 / STEPS_PER_REV))
+    print("Y running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g" %
+          (y["running"], y["speed"], y["min"], y["max"], y["pos"],
+           y["pos"] * y["lead_mm"] / STEPS_PER_REV, y["sgthrs"], y["lead_mm"]))
+    print("Z running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g" %
+          (z["running"], z["speed"], z["min"], z["max"], z["pos"],
+           z["pos"] * z["lead_mm"] / STEPS_PER_REV, z["sgthrs"], z["lead_mm"]))
+    try:
+        a_pos_str = "%.4gdeg" % servo.read_position_deg()
+    except OSError:
+        a_pos_str = "unknown (servo read failed)"
+    print("A running=%s speed=%d min_deg=%d max_deg=%d pos=%s" %
+          (a["running"], a["speed"], a["min_deg"], a["max_deg"], a_pos_str))
 
 
 _cycle_task = None
@@ -487,6 +527,7 @@ def start_all(duration_minutes=None):
 def stop_all():
     for key in ("x", "y", "z", "a"):
         state[key]["running"] = False
+    save_config()  # checkpoint X/Y/Z's pos right away instead of waiting for the next autosave
     print("ok STOP - all axes stopped")
 
 
@@ -548,6 +589,7 @@ def _dispatch_command(line):
             axis["running"] = True
         elif sub == "STOP":
             axis["running"] = False
+            persist = True  # checkpoint X/Y/Z's pos right away instead of waiting for autosave
         elif sub == "SPEED" and len(parts) >= 3:
             axis["speed"] = int(parts[2])
             persist = True
@@ -621,7 +663,7 @@ async def main():
     print_status()
     print("ready - type HELP for commands")
     await asyncio.gather(x_task(), bounce_task(y_motor, "y"), bounce_task(z_motor, "z"),
-                          servo_task(), console_task())
+                          servo_task(), console_task(), position_autosave_task())
 
 
 if __name__ == "__main__":
