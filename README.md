@@ -46,7 +46,7 @@ Commands are sent one per line over the console (REPL):
 | `X SPEED <steps_per_sec>` | Table rotation speed (sign sets direction, 0 = stopped) |
 | `X START [CW\|CCW]` | Start table rotation - direction optional, defaults to CW (or last-used) |
 | `X STOP` | Stop table rotation |
-| `X MOVE <deg>` | One-shot relative rotation by a signed angle - axis must be stopped first |
+| `X MOVE <deg>` | One-shot relative rotation by a signed angle - axis must be stopped first (X has no `MIN`/`MAX`, so `MIN`/`MAX`/`MID` don't apply and are rejected) |
 | `X ZERO` | Make the current position 0 (see below) |
 | `X MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
 | `X CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
@@ -57,7 +57,7 @@ Commands are sent one per line over the console (REPL):
 | `Y SGTHRS <0-255>` | StallGuard sensorless-homing threshold (see below) - higher trips more easily |
 | `Y HOME [DEC\|INC] [speed]` | One-shot calibration: home toward a StallGuard stall (see below) |
 | `Y LEAD <mm>` | Lead screw pitch (mm per screw revolution) - used to convert `MOVE`'s millimeters to steps |
-| `Y MOVE <mm>` | One-shot relative move by a signed distance in mm - axis must be stopped first, clamped to `MIN`/`MAX` |
+| `Y MOVE <mm\|MIN\|MAX\|MID>` | One-shot move: a signed relative distance in mm (clamped to `MIN`/`MAX`), or straight to `MIN`/`MAX`/the midpoint - axis must be stopped first |
 | `Y ZERO` | Make the current position 0 (see below) |
 | `Y MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
 | `Y CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
@@ -70,7 +70,7 @@ Commands are sent one per line over the console (REPL):
 | `Z SGTHRS <0-255>` | StallGuard sensorless-homing threshold (see below) - higher trips more easily |
 | `Z HOME [DEC\|INC] [speed]` | One-shot calibration: home toward a StallGuard stall (see below) |
 | `Z LEAD <mm>` | Lead screw pitch (mm per screw revolution) - used to convert `MOVE`'s millimeters to steps |
-| `Z MOVE <mm>` | One-shot relative move by a signed distance in mm - axis must be stopped first, clamped to `MIN`/`MAX` |
+| `Z MOVE <mm\|MIN\|MAX\|MID>` | One-shot move: a signed relative distance in mm (clamped to `MIN`/`MAX`), or straight to `MIN`/`MAX`/the midpoint - axis must be stopped first |
 | `Z ZERO` | Make the current position 0 (see below) |
 | `Z MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
 | `Z CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
@@ -80,7 +80,7 @@ Commands are sent one per line over the console (REPL):
 | `A MIN <deg>` | Minimum scanner tilt angle (degrees) |
 | `A MAX <deg>` | Maximum scanner tilt angle (degrees) |
 | `A SPEED <raw_units>` | Servo speed (raw register units, tune empirically) |
-| `A MOVE <deg>` | One-shot relative move by a signed angle - axis must be stopped first, clamped to `MIN`/`MAX` |
+| `A MOVE <deg\|MIN\|MAX\|MID>` | One-shot move: a signed relative angle in degrees (clamped to `MIN`/`MAX`), or straight to `MIN`/`MAX`/the midpoint - axis must be stopped first |
 | `A TMC` | Servo health: voltage, temperature, load, current, error flags (see below) |
 | `A START` | Start cyclic tilt between `MIN` and `MAX` |
 | `A STOP` | Stop the servo |
@@ -116,6 +116,15 @@ A MOVE -15
 STATUS
 ```
 
+Or straight to a limit instead of a relative distance:
+
+```
+Y MOVE MIN
+Y MOVE MAX
+Y MOVE MID
+A MOVE MID
+```
+
 ### Y/Z sensorless homing (StallGuard)
 
 Y and Z have no physical endstop switches. Instead, `HOME` deliberately drives the axis toward one end (`DEC` = decreasing position, `INC` = increasing; Y defaults to `DEC`, Z to `INC`) while polling the TMC2209's StallGuard result (`SG_RESULT`) over UART - it drops as motor load rises, so driving into a real mechanical stop reads as a stall. Once that happens, `MIN` (for a `DEC` stall) or `MAX` (for an `INC` stall) is set to the position it stalled at.
@@ -136,7 +145,7 @@ This is a one-shot calibration - run `HOME` once before the first `START`, the w
 
 `Y`/`Z MOVE` takes a distance in millimeters, converted to motor steps via that axis's `LEAD` (millimeters per lead-screw revolution - depends on your actual hardware, so it's configurable, default 4mm) and that axis's own `MICROSTEPS` setting (see below). `X MOVE` takes an angle in degrees instead, since X turns the turntable directly rather than driving a screw. `A MOVE` also takes degrees, but unlike the open-loop stepper axes, it reads the servo's own absolute position feedback and issues a single absolute goal instead of counting steps.
 
-All four `MOVE` commands are one-shot and relative (signed, from the current position), require the axis not already running/bouncing, and (except X, which has no fixed reference to clamp against) clamp their target to `MIN`/`MAX` so they can't grind past a homed limit.
+All four `MOVE` commands are one-shot, require the axis not already running/bouncing, and (except X, which has no fixed reference to clamp against) clamp their target to `MIN`/`MAX` so they can't grind past a homed limit. Given a number, `MOVE` is relative (signed, from the current position). Given `MIN`, `MAX`, or `MID` instead, `Y`/`Z`/`A MOVE` go straight to that limit (or the midpoint between them) from wherever the axis currently is - an absolute move, not a relative one. X has no `MIN`/`MAX` at all, so `X MOVE MIN`/`MAX`/`MID` is rejected outright.
 
 ### Microstepping and current (MICROSTEPS, CURRENT)
 
