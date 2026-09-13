@@ -18,6 +18,7 @@ Console commands (G-code-like, one per line):
     X STOP
     X MOVE <deg>                one-shot relative rotation (signed), axis must
                                  be stopped first - see below
+    X ZERO                      make the current position 0 - see below
 
     Y MIN <steps>
     Y MAX <steps>
@@ -26,6 +27,7 @@ Console commands (G-code-like, one per line):
     Y HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
     Y LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
     Y MOVE <mm>                 one-shot relative move (signed) - see below
+    Y ZERO                      make the current position 0 - see below
     Y START
     Y STOP
 
@@ -36,6 +38,7 @@ Console commands (G-code-like, one per line):
     Z HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
     Z LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
     Z MOVE <mm>                 one-shot relative move (signed) - see below
+    Z ZERO                      make the current position 0 - see below
     Z START
     Z STOP
 
@@ -45,12 +48,21 @@ during the homing move, using a reduced current and forced spreadCycle
 just for that move, since StallGuard's signal is too noisy under
 stealthChop to trust otherwise (see TROUBLESHOOTING.md). HOME
 deliberately drives toward one end (DEC = decreasing position, INC =
-increasing) until SG_RESULT drops below SGTHRS. A stall toward DEC sets
-MIN to that position, toward INC sets MAX. Direction/speed given are
+increasing) until SG_RESULT drops below SGTHRS, then makes that stall
+point pos=0 (MIN or MAX - whichever end it stalled toward - ends up
+exactly 0; the other one shifts by the same amount, so it still means
+the same real distance from the new zero). Direction/speed given are
 remembered (Y defaults to DEC, Z to INC, both at 1000 steps/sec) -
 "Y HOME" alone reuses whatever was last set. SGTHRS is a raw SG_RESULT
 floor here (not the doubled on-chip register comparison) and needs
 tuning by hand for your actual mechanics/speed.
+
+X/Y/Z ZERO does the same zeroing HOME does (current pos becomes 0,
+MIN/MAX shift to match), but instantly and wherever the axis currently
+is - no motion, no StallGuard involved. Use it to redefine the origin
+by hand instead of (or in addition to) a StallGuard-based HOME - e.g.
+X has no HOME at all (continuous rotation, nothing to stall against),
+so ZERO is the only way to give it a zero reference.
 
 This is a one-shot calibration, run once before the first START - like
 Klipper/Voron-style sensorless homing, ordinary bouncing afterward does
@@ -280,12 +292,34 @@ async def bounce_task(motor, state_key):
             await asyncio.sleep_ms(20)
 
 
+def zero_position(state_key):
+    """Redefines the axis's current pos as 0. For Y/Z, MIN/MAX shift by the
+    same offset so they keep representing the same real physical distance
+    from the (new) zero - the mechanism hasn't actually moved, only the
+    coordinate labels have. Used by both HOME (zeroes at the stall point)
+    and the standalone ZERO command (zeroes wherever the axis is right
+    now). Safe to call while the axis is running: it only touches state
+    dict entries, no motor I/O, and (uasyncio being cooperative) nothing
+    else runs until this function returns, so bounce_task/x_task can't
+    observe a half-shifted state.
+    """
+    st = state[state_key]
+    offset = st["pos"]
+    st["pos"] = 0
+    if "min" in st:
+        st["min"] -= offset
+    if "max" in st:
+        st["max"] -= offset
+
+
 async def home_axis(motor, state_key):
     """Deliberately drives toward state["home_dir"] at state["home_speed"]
-    until SG_RESULT (polled over UART) drops below SGTHRS, then sets MIN
-    (DEC) or MAX (INC) to where it stopped. Meant for an explicit
-    "Y HOME"/"Z HOME" console command, run once before the axis is first
-    START-ed - not part of normal bouncing.
+    until SG_RESULT (polled over UART) drops below SGTHRS, then zeroes pos
+    at the stall point (MIN/MAX shift along with it, so they keep meaning
+    the same real distance from the new zero) and sets MIN (DEC) or MAX
+    (INC) to that same zero. Meant for an explicit "Y HOME"/"Z HOME"
+    console command, run once before the axis is first START-ed - not
+    part of normal bouncing.
     """
     st = state[state_key]
     if st["running"]:
@@ -346,8 +380,9 @@ async def home_axis(motor, state_key):
                         st["max"] = st["pos"]
                     else:
                         st["min"] = st["pos"]
+                    zero_position(state_key)  # the stall point becomes pos=0
                     save_config()
-                    print(state_key.upper(), "homed, pos=%d (SG_RESULT=%d)" % (st["pos"], sg))
+                    print(state_key.upper(), "homed, pos=0 (SG_RESULT=%d)" % sg)
                     return
 
         print(state_key.upper(), "HOME failed: StallGuard never tripped after",
@@ -590,6 +625,9 @@ def _dispatch_command(line):
         elif sub == "STOP":
             axis["running"] = False
             persist = True  # checkpoint X/Y/Z's pos right away instead of waiting for autosave
+        elif sub == "ZERO" and cmd in ("X", "Y", "Z"):
+            zero_position(cmd.lower())
+            persist = True
         elif sub == "SPEED" and len(parts) >= 3:
             axis["speed"] = int(parts[2])
             persist = True
