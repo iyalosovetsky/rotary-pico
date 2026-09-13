@@ -30,8 +30,8 @@ MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
     X CURRENT <mA>               run current - see below
     X TMC                       TMC2209 driver health (faults/temp/current) - see below
 
-    Y MIN <steps>
-    Y MAX <steps>
+    Y MIN <mm>                   default 0 - lower limit of travel, see below
+    Y MAX <mm>                   default 4 - upper limit of travel, see below
     Y SPEED <steps_per_sec>     unsigned
     Y SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Y HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
@@ -44,8 +44,8 @@ MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
     Y START
     Y STOP
 
-    Z MIN <steps>
-    Z MAX <steps>
+    Z MIN <mm>                   default 0 - lower limit of travel, see below
+    Z MAX <mm>                   default 4 - upper limit of travel, see below
     Z SPEED <steps_per_sec>     unsigned
     Z SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Z HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
@@ -74,24 +74,25 @@ floor here (not the doubled on-chip register comparison) and needs
 tuning by hand for your actual mechanics/speed.
 
 X/Y/Z ZERO does the same zeroing HOME does (current pos becomes 0,
-MIN/MAX shift to match - in steps for Y/Z, in degrees for X), but
-instantly and wherever the axis currently is - no motion, no StallGuard
-involved. Use it to redefine the origin by hand instead of (or in
-addition to) a StallGuard-based HOME - e.g. X has no HOME at all
-(continuous rotation, nothing to stall against), so ZERO is the only
-way to give it a zero reference.
+MIN/MAX shift to match - in millimeters for Y/Z, in degrees for X, see
+MIN/MAX below), but instantly and wherever the axis currently is - no
+motion, no StallGuard involved. Use it to redefine the origin by hand
+instead of (or in addition to) a StallGuard-based HOME - e.g. X has no
+HOME at all (continuous rotation, nothing to stall against), so ZERO
+is the only way to give it a zero reference.
 
-X/Y/Z MICROSTEPS changes the driver's microstep resolution live (one of
-256/128/64/32/16/8/4/2/1) and persists it, same as the rig's old fixed
-16 default. Changing it rescales pos/MIN/MAX by the resolution ratio,
-so an existing HOME calibration or current position keeps meaning the
-same real distance - one step is a different physical distance at a
-different microstep setting, so without rescaling, MIN/MAX would
-silently go wrong instead of just needing conversion. X/Y/Z CURRENT
-sets that axis's normal run current in mA (hold current is still
-derived as half of it, see TMC2209.set_current) and persists it -
-separate from HOME_CURRENT_MA, which only applies transiently during
-the HOME move itself.
+Y/Z MIN/MAX (in millimeters, via LEAD - like MOVE) and X's MIN_DEG/
+MAX_DEG (in degrees) are physical units, not steps, so a MICROSTEPS
+change never needs to rescale them the way it rescales "pos" itself -
+a millimeter or a degree means the same real distance no matter the
+microstep resolution, unlike a raw step count. X/Y/Z MICROSTEPS
+changes the driver's microstep resolution live (one of
+256/128/64/32/16/8/4/2/1) and persists it, rescaling only "pos" by the
+resolution ratio so it keeps meaning the same real physical location.
+X/Y/Z CURRENT sets that axis's normal run current in mA (hold current
+is still derived as half of it, see TMC2209.set_current) and persists
+it - separate from HOME_CURRENT_MA, which only applies transiently
+during the HOME move itself.
 
 X/Y/Z TMC reads that driver's own GSTAT/DRV_STATUS registers and
 prints a one-line health summary: OK, or ERROR(...) listing any of
@@ -236,17 +237,19 @@ HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google
 HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SGTHRS, broken wiring)
 
 state = {
-    # X's MIN/MAX are in degrees (min_deg/max_deg, like A), not steps (unlike Y/Z's
-    # min/max) - X's natural unit is angular (MOVE already takes degrees for it), and
-    # degrees are resolution-independent, so a MICROSTEPS change doesn't need to
-    # rescale them the way Y/Z's step-based min/max does (see set_axis_microsteps).
+    # X's MIN/MAX are in degrees (min_deg/max_deg, like A); Y/Z's are in
+    # millimeters (min_mm/max_mm, via LEAD) - neither is in steps. Both units
+    # are physical/resolution-independent, so a MICROSTEPS change doesn't
+    # need to rescale them the way it does "pos" (see set_axis_microsteps),
+    # and (for Y/Z) neither does a LEAD change - correcting LEAD changes how
+    # many steps a given mm is, not what that mm physically means.
     "x": {"running": False, "speed": 200, "pos": 0, "microsteps": 16, "current_ma": 800,
           "min_deg": 0.0, "max_deg": 180.0},
-    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
-          "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
+    "y": {"running": False, "speed": 400, "min_mm": 0.0, "max_mm": 4.0, "pos": 0, "dir": 1,
+          "sgthrs": 20, "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
           "microsteps": 16, "current_ma": 800},
-    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
-          "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
+    "z": {"running": False, "speed": 400, "min_mm": 0.0, "max_mm": 4.0, "pos": 0, "dir": 1,
+          "sgthrs": 20, "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0,
           "microsteps": 16, "current_ma": 800},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
@@ -256,8 +259,8 @@ state = {
 # Only for plain value settings; not for START/STOP/ZERO/TMC/HOME/MOVE, which have
 # no bare-query meaning of their own. ----
 _QUERYABLE_FIELDS = {
-    "MIN": {"X": "min_deg", "Y": "min", "Z": "min", "A": "min_deg"},
-    "MAX": {"X": "max_deg", "Y": "max", "Z": "max", "A": "max_deg"},
+    "MIN": {"X": "min_deg", "Y": "min_mm", "Z": "min_mm", "A": "min_deg"},
+    "MAX": {"X": "max_deg", "Y": "max_mm", "Z": "max_mm", "A": "max_deg"},
     "SPEED": {"X": "speed", "Y": "speed", "Z": "speed", "A": "speed"},
     "SGTHRS": {"Y": "sgthrs", "Z": "sgthrs"},
     "MICROSTEPS": {"X": "microsteps", "Y": "microsteps", "Z": "microsteps"},
@@ -282,9 +285,9 @@ STALL_CONFIRM_COUNT = 3  # cheap insurance against a single noisy SG_RESULT samp
 CONFIG_FILE = "rig_config.json"
 _PERSISTED_FIELDS = {
     "x": ("speed", "pos", "microsteps", "current_ma", "min_deg", "max_deg"),
-    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
+    "y": ("min_mm", "max_mm", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
           "microsteps", "current_ma"),
-    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
+    "z": ("min_mm", "max_mm", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm", "pos",
           "microsteps", "current_ma"),
     "a": ("min_deg", "max_deg", "speed"),
 }
@@ -308,6 +311,29 @@ def load_config():
     except (OSError, ValueError):
         cfg = {}  # no config file yet, or it's corrupt - fall through to write the defaults
 
+    # One-time migration: Y/Z's MIN/MAX used to be raw steps ("min"/"max");
+    # they're now millimeters ("min_mm"/"max_mm"). Convert using that axis's
+    # own saved lead_mm/microsteps (falling back to today's defaults if
+    # either wasn't saved yet) so an existing real HOME calibration keeps
+    # meaning the same physical position instead of silently resetting to
+    # the mm defaults the first time this runs on an old config file.
+    # Forces a save below (via `migrated`) - otherwise the fields-present
+    # check right after would see min_mm/max_mm already there and never
+    # write the migration back out to CONFIG_FILE.
+    migrated = False
+    for key in ("y", "z"):
+        saved = cfg.get(key, {})
+        if "min_mm" not in saved and "min" in saved:
+            microsteps = saved.get("microsteps", state[key]["microsteps"])
+            lead_mm = saved.get("lead_mm", state[key]["lead_mm"])
+            steps_per_mm = (FULL_STEPS_PER_REV * microsteps) / lead_mm
+            saved["min_mm"] = saved.pop("min") / steps_per_mm
+            saved["max_mm"] = saved.pop("max") / steps_per_mm
+            cfg[key] = saved
+            migrated = True
+            print(key.upper(), "MIN/MAX migrated from steps to mm: min_mm=%.4g max_mm=%.4g" %
+                  (saved["min_mm"], saved["max_mm"]))
+
     missing_defaults = False
     for axis, fields in _PERSISTED_FIELDS.items():
         saved = cfg.get(axis, {})
@@ -315,7 +341,7 @@ def load_config():
         if any(field not in saved for field in fields):
             missing_defaults = True  # new field (or a brand new file) - persist the default
 
-    if missing_defaults:
+    if missing_defaults or migrated:
         save_config()
         print("saved defaults for missing", CONFIG_FILE, "fields")
 
@@ -365,7 +391,9 @@ async def x_task():
 
 
 async def bounce_task(motor, state_key):
-    """Drives Y or Z: bounces back and forth between state["min"]/state["max"].
+    """Drives Y or Z: bounces back and forth between MIN_MM/MAX_MM,
+    converted to steps each iteration since they're kept in millimeters
+    (see the state dict comment on why) while pos is in steps.
 
     No live StallGuard/DIAG check here - that only works reliably under
     spreadCycle + reduced current (see home_axis and TROUBLESHOOTING.md),
@@ -377,10 +405,13 @@ async def bounce_task(motor, state_key):
     while True:
         st = state[state_key]
         if st["running"]:
-            target = st["max"] if st["dir"] == 1 else st["min"]
+            steps_per_mm = steps_per_rev(state_key) / st["lead_mm"]
+            min_pos = round(st["min_mm"] * steps_per_mm)
+            max_pos = round(st["max_mm"] * steps_per_mm)
+            target = max_pos if st["dir"] == 1 else min_pos
             if st["pos"] == target:
                 st["dir"] *= -1
-                target = st["max"] if st["dir"] == 1 else st["min"]
+                target = max_pos if st["dir"] == 1 else min_pos
             step_dir = 1 if target > st["pos"] else -1
             motor.dir.value(1 if step_dir > 0 else 0)
             motor.step.value(1)
@@ -394,51 +425,46 @@ async def bounce_task(motor, state_key):
 
 
 def zero_position(state_key):
-    """Redefines the axis's current pos as 0. For Y/Z, MIN/MAX (in steps)
-    shift by the same offset so they keep representing the same real
-    physical distance from the (new) zero - the mechanism hasn't actually
-    moved, only the coordinate labels have. For X, MIN_DEG/MAX_DEG (in
-    degrees) shift by that same offset converted to degrees, same
-    reasoning. Used by both HOME (zeroes at the stall point, Y/Z only)
-    and the standalone ZERO command (zeroes wherever the axis is right
-    now, X/Y/Z). Safe to call while the axis is running: it only touches
-    state dict entries, no motor I/O, and (uasyncio being cooperative)
-    nothing else runs until this function returns, so bounce_task/x_task
-    can't observe a half-shifted state.
+    """Redefines the axis's current pos as 0. MIN/MAX shift by the same
+    offset (converted to whatever physical unit they're kept in) so they
+    keep representing the same real physical position from the (new) zero
+    - the mechanism hasn't actually moved, only the coordinate labels
+    have. X's MIN_DEG/MAX_DEG are in degrees; Y/Z's MIN_MM/MAX_MM are in
+    millimeters (via LEAD). Used by both HOME (zeroes at the stall point,
+    Y/Z only) and the standalone ZERO command (zeroes wherever the axis
+    is right now, X/Y/Z). Safe to call while the axis is running: it only
+    touches state dict entries, no motor I/O, and (uasyncio being
+    cooperative) nothing else runs until this function returns, so
+    bounce_task/x_task can't observe a half-shifted state.
     """
     st = state[state_key]
     offset = st["pos"]
     st["pos"] = 0
-    if "min" in st:
-        st["min"] -= offset
-    if "max" in st:
-        st["max"] -= offset
-    if "min_deg" in st and state_key != "a":
+    if "min_deg" in st:
         offset_deg = offset * 360.0 / steps_per_rev(state_key)
         st["min_deg"] -= offset_deg
         st["max_deg"] -= offset_deg
+    if "min_mm" in st:
+        offset_mm = offset / (steps_per_rev(state_key) / st["lead_mm"])
+        st["min_mm"] -= offset_mm
+        st["max_mm"] -= offset_mm
 
 
 def set_axis_microsteps(state_key, motor, new_microsteps):
-    """Changes the driver's microstep resolution and rescales pos/MIN/MAX
-    (for Y/Z) by the same ratio. A single step means a different real
-    distance at a different microstep setting, so without rescaling, a
-    MIN/MAX from an earlier HOME (or the current pos) would silently
-    stop meaning the same physical location instead of just needing
-    conversion - same reasoning as zero_position()'s coordinate shift.
-    Writes to the driver first: if new_microsteps isn't a valid setting,
-    TMC2209.set_microsteps() raises ValueError before any state changes.
+    """Changes the driver's microstep resolution and rescales "pos" by the
+    ratio, so it keeps meaning the same real physical location - a single
+    step means a different real distance at a different microstep
+    setting. MIN/MAX don't need this: they're kept in physical units
+    (degrees for X, millimeters for Y/Z), not steps - see the state dict
+    comment. Writes to the driver first: if new_microsteps isn't a valid
+    setting, TMC2209.set_microsteps() raises ValueError before any state
+    changes.
     """
     st = state[state_key]
     old_microsteps = st["microsteps"]
     motor.set_microsteps(new_microsteps)
     if new_microsteps != old_microsteps:
-        ratio = new_microsteps / old_microsteps
-        st["pos"] = round(st["pos"] * ratio)
-        if "min" in st:
-            st["min"] = round(st["min"] * ratio)
-        if "max" in st:
-            st["max"] = round(st["max"] * ratio)
+        st["pos"] = round(st["pos"] * new_microsteps / old_microsteps)
     st["microsteps"] = new_microsteps
 
 
@@ -506,10 +532,11 @@ async def home_axis(motor, state_key):
                     stalled = False  # transient UART hiccup - just skip this check
                 consecutive_stalls = consecutive_stalls + 1 if stalled else 0
                 if consecutive_stalls >= STALL_CONFIRM_COUNT:
+                    stall_mm = st["pos"] / (steps_per_rev(state_key) / st["lead_mm"])
                     if direction > 0:
-                        st["max"] = st["pos"]
+                        st["max_mm"] = stall_mm
                     else:
-                        st["min"] = st["pos"]
+                        st["min_mm"] = stall_mm
                     zero_position(state_key)  # the stall point becomes pos=0
                     save_config()
                     print(state_key.upper(), "homed, pos=0 (SG_RESULT=%d)" % sg)
@@ -536,7 +563,9 @@ async def move_linear_axis(motor, state_key, distance_mm):
 
     steps_per_mm = steps_per_rev(state_key) / st["lead_mm"]
     target_pos = st["pos"] + round(distance_mm * steps_per_mm)
-    clamped_pos = max(st["min"], min(st["max"], target_pos))
+    min_pos = round(st["min_mm"] * steps_per_mm)
+    max_pos = round(st["max_mm"] * steps_per_mm)
+    clamped_pos = max(min_pos, min(max_pos, target_pos))
     if clamped_pos != target_pos:
         print(state_key.upper(), "MOVE: clamped to MIN/MAX (%d instead of %d)" %
               (clamped_pos, target_pos))
@@ -574,11 +603,12 @@ async def move_linear_axis_to(motor, state_key, pseudo):
         return
 
     if pseudo == "MIN":
-        target_pos = st["min"]
+        target_mm = st["min_mm"]
     elif pseudo == "MAX":
-        target_pos = st["max"]
+        target_mm = st["max_mm"]
     else:
-        target_pos = round((st["min"] + st["max"]) / 2)
+        target_mm = (st["min_mm"] + st["max_mm"]) / 2.0
+    target_pos = round(target_mm * steps_per_rev(state_key) / st["lead_mm"])
 
     steps = abs(target_pos - st["pos"])
     if steps == 0:
@@ -840,15 +870,15 @@ def print_status():
           (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW",
            x["pos"], x["pos"] * 360.0 / steps_per_rev("x"), x["min_deg"], x["max_deg"],
            x["microsteps"], x["current_ma"]))
-    print("Y running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g "
-          "microsteps=%d current_ma=%d" %
-          (y["running"], y["speed"], y["min"], y["max"], y["pos"],
-           y["pos"] * y["lead_mm"] / steps_per_rev("y"), y["sgthrs"], y["lead_mm"],
+    print("Y running=%s speed=%d pos=%d (%.4gmm) min_mm=%.4g max_mm=%.4g sgthrs=%d "
+          "lead_mm=%.4g microsteps=%d current_ma=%d" %
+          (y["running"], y["speed"], y["pos"], y["pos"] * y["lead_mm"] / steps_per_rev("y"),
+           y["min_mm"], y["max_mm"], y["sgthrs"], y["lead_mm"],
            y["microsteps"], y["current_ma"]))
-    print("Z running=%s speed=%d min=%d max=%d pos=%d (%.4gmm) sgthrs=%d lead_mm=%.4g "
-          "microsteps=%d current_ma=%d" %
-          (z["running"], z["speed"], z["min"], z["max"], z["pos"],
-           z["pos"] * z["lead_mm"] / steps_per_rev("z"), z["sgthrs"], z["lead_mm"],
+    print("Z running=%s speed=%d pos=%d (%.4gmm) min_mm=%.4g max_mm=%.4g sgthrs=%d "
+          "lead_mm=%.4g microsteps=%d current_ma=%d" %
+          (z["running"], z["speed"], z["pos"], z["pos"] * z["lead_mm"] / steps_per_rev("z"),
+           z["min_mm"], z["max_mm"], z["sgthrs"], z["lead_mm"],
            z["microsteps"], z["current_ma"]))
     try:
         a_pos_str = "%.4gdeg" % servo.read_position_deg()
@@ -986,10 +1016,10 @@ def _dispatch_command(line):
             axis["speed"] = int(parts[2])
             persist = True
         elif sub == "MIN" and len(parts) >= 3 and cmd in ("Y", "Z"):
-            axis["min"] = int(parts[2])
+            axis["min_mm"] = float(parts[2])
             persist = True
         elif sub == "MAX" and len(parts) >= 3 and cmd in ("Y", "Z"):
-            axis["max"] = int(parts[2])
+            axis["max_mm"] = float(parts[2])
             persist = True
         elif sub == "SGTHRS" and len(parts) >= 3 and cmd in ("Y", "Z"):
             axis["sgthrs"] = int(parts[2])
