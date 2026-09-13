@@ -293,12 +293,35 @@ _PERSISTED_FIELDS = {
 }
 
 
+def _pretty_json(cfg, indent=2):
+    """MicroPython's json.dumps has no indent= option (unlike CPython's),
+    so this builds simple indented output by hand for readability when
+    inspecting/editing rig_config.json by hand. Only handles the shape
+    this config actually has - one level of axis dicts, each a flat
+    field:value dict, never deeper - using json.dumps per key/value so
+    strings/floats/bools/None are still escaped/formatted correctly.
+    """
+    lines = ["{"]
+    axis_keys = list(cfg.keys())
+    for i, axis in enumerate(axis_keys):
+        fields = cfg[axis]
+        lines.append(" " * indent + json.dumps(axis) + ": {")
+        field_keys = list(fields.keys())
+        for j, field in enumerate(field_keys):
+            comma = "," if j < len(field_keys) - 1 else ""
+            lines.append(" " * (indent * 2) + json.dumps(field) + ": " +
+                         json.dumps(fields[field]) + comma)
+        lines.append(" " * indent + "}" + ("," if i < len(axis_keys) - 1 else ""))
+    lines.append("}")
+    return "\n".join(lines)
+
+
 def save_config():
     cfg = {axis: {field: state[axis][field] for field in fields}
            for axis, fields in _PERSISTED_FIELDS.items()}
     try:
         with open(CONFIG_FILE, "w") as f:
-            json.dump(cfg, f)
+            f.write(_pretty_json(cfg))
     except OSError as e:
         print("WARNING: failed to save", CONFIG_FILE, "-", e)
 
