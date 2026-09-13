@@ -70,11 +70,16 @@ so ZERO is the only way to give it a zero reference.
 X/Y/Z TMC reads that driver's own GSTAT/DRV_STATUS registers and
 prints a one-line health summary: OK, or ERROR(...) listing any of
 RESET/DRV_ERR/UV_CP (GSTAT) or OTPW/OT/S2GA/S2GB/S2VSA/S2VSB/OLA/OLB
-(DRV_STATUS) that are set, plus cs_actual (the driver's live current
-scale, 0-31), mode (stealthChop/spreadCycle), and standstill. Useful
-for diagnosing a motor that's silently drawing less current or running
-hotter than expected, without pulling a multimeter. RESET is expected
-once right after power-up; GSTAT is cleared after each read so it
+(DRV_STATUS) that are set, plus current (the driver's live actual
+current in mA - IHOLD, not IRUN, while standstill=yes), microsteps
+(read back from CHOPCONF, not assumed), mode (stealthChop/spreadCycle),
+standstill, and (Y/Z only) sgthrs - shown as "sgthrs=N(cfg)" since
+SGTHRS is write-only on this chip (see enable_stallguard/HOME above),
+so this is just the value last configured in software, not a hardware
+readback. Useful for diagnosing a motor that's silently drawing less
+current or running hotter than expected, without pulling a multimeter.
+RESET is expected once right after power-up; GSTAT is cleared after
+each read so it
 doesn't keep reporting an old event as if it just happened.
 
 This is a one-shot calibration, run once before the first START - like
@@ -651,7 +656,7 @@ def _dispatch_command(line):
             persist = True
         elif sub == "TMC" and cmd in ("X", "Y", "Z"):
             motor = {"X": x_motor, "Y": y_motor, "Z": z_motor}[cmd]
-            print(cmd, "TMC:", motor.diag_summary())
+            print(cmd, "TMC:", motor.diag_summary(axis.get("sgthrs")))
         elif sub == "TMC" and cmd == "A":
             print("A TMC:", servo.diag_summary())
         elif sub == "SPEED" and len(parts) >= 3:

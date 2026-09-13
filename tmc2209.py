@@ -146,18 +146,25 @@ class TMC2209:
         pwmconf |= (1 << 18) | (1 << 19)  # pwm_autoscale, pwm_autograd
         self.write(REG_PWMCONF, pwmconf)
 
+    def _vfs(self):
+        return 0.180 if self.vsense else 0.325
+
+    def _ma_to_cs(self, ma):
+        i = ma / 1000.0
+        cs = int(round(32.0 * 1.41421356 * i * (self.rsense + 0.02) / self._vfs() - 1))
+        return max(0, min(31, cs))
+
+    def cs_to_ma(self, cs):
+        """Inverse of _ma_to_cs(): converts a raw current-scale reading
+        (e.g. DRV_STATUS's CS_ACTUAL) back to milliamps, using this
+        driver's own rsense/vsense - see diag_summary()."""
+        return (cs + 1) * self._vfs() / (32.0 * 1.41421356 * (self.rsense + 0.02)) * 1000.0
+
     def set_current(self, run_ma, hold_ma=None, hold_delay=10):
         if hold_ma is None:
             hold_ma = run_ma // 2
-        vfs = 0.180 if self.vsense else 0.325
-
-        def to_cs(ma):
-            i = ma / 1000.0
-            cs = int(round(32.0 * 1.41421356 * i * (self.rsense + 0.02) / vfs - 1))
-            return max(0, min(31, cs))
-
-        irun = to_cs(run_ma)
-        ihold = to_cs(hold_ma)
+        irun = self._ma_to_cs(run_ma)
+        ihold = self._ma_to_cs(hold_ma)
         value = (ihold & 0x1F) | ((irun & 0x1F) << 8) | ((hold_delay & 0xF) << 16)
         self.write(REG_IHOLD_IRUN, value)
 
@@ -168,6 +175,16 @@ class TMC2209:
         chopconf &= ~(0xF << 24)
         chopconf |= (_MRES_TABLE[microsteps] << 24)
         self.write(REG_CHOPCONF, chopconf)
+
+    def read_microsteps(self):
+        """Reads the live MRES field back from CHOPCONF (bits 24-27) -
+        inverse of set_microsteps(). CHOPCONF is R+W (unlike IHOLD_IRUN/
+        TCOOLTHRS/SGTHRS), so this reflects whatever was actually written."""
+        mres = (self.read(REG_CHOPCONF) >> 24) & 0xF
+        for microsteps, code in _MRES_TABLE.items():
+            if code == mres:
+                return microsteps
+        return None  # shouldn't happen - MRES is always one of _MRES_TABLE's codes
 
     def enable_driver(self, enabled=True):
         if self.en is not None:
@@ -216,13 +233,22 @@ class TMC2209:
         datasheet section 5.5.3."""
         return self.read(REG_DRV_STATUS)
 
-    def diag_summary(self):
+    def diag_summary(self, sgthrs=None):
         """Human-readable driver health check: decodes GSTAT + DRV_STATUS
         per the TMC2209 datasheet (GSTAT bits in the general config table,
-        DRV_STATUS in section 5.5.3). Meant for an interactive console
-        status command - code that needs to act on a specific flag should
-        read the registers directly instead of parsing this string.
-        Clears GSTAT after reading (see clear_gstat).
+        DRV_STATUS in section 5.5.3). current_ma is CS_ACTUAL converted
+        back to mA - the driver's live, actually-applied current, which is
+        IHOLD (not IRUN) while standstill=yes. microsteps is read back
+        from CHOPCONF, not assumed from whatever set_microsteps() was last
+        called with. Meant for an interactive console status command -
+        code that needs to act on a specific flag should read the
+        registers directly instead of parsing this string. Clears GSTAT
+        after reading (see clear_gstat).
+
+        sgthrs, if given, is appended as-is (e.g. "sgthrs=20(cfg)") - it
+        can't be read back from the chip (SGTHRS is write-only, see
+        enable_stallguard), so this only echoes whatever the caller says
+        it last configured the register to, not a hardware readback.
         """
         gstat = self.read_gstat()
         self.clear_gstat()
@@ -253,10 +279,16 @@ class TMC2209:
             flags.append("OLB")  # per the datasheet - check during slow motion
 
         cs_actual = (drv >> 16) & 0x1F
+        current_ma = self.cs_to_ma(cs_actual)
+        microsteps = self.read_microsteps()
         mode = "stealthChop" if (drv & (1 << 30)) else "spreadCycle"
         standstill = "yes" if (drv & (1 << 31)) else "no"
         status = "OK" if not flags else "ERROR(%s)" % ",".join(flags)
-        return "%s cs_actual=%d mode=%s standstill=%s" % (status, cs_actual, mode, standstill)
+        result = "%s current=%.4gmA microsteps=%s mode=%s standstill=%s" % (
+            status, current_ma, microsteps, mode, standstill)
+        if sgthrs is not None:
+            result += " sgthrs=%d(cfg)" % sgthrs
+        return result
 
     def move(self, steps, step_delay_us=800):
         """Simple blocking STEP/DIR move - fine for bench testing."""
