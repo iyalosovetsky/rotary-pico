@@ -33,25 +33,24 @@ Console commands (G-code-like, one per line):
     Z START
     Z STOP
 
-Y and Z have no physical endstops - hitting the mechanical limit is
-detected via the TMC2209's StallGuard, read through the DIAG pin
-(requires the board's switch set to route each driver's DIAG output to
-its Y-STOP/Z-STOP header - see PINOUT.md). This is a fast GPIO read,
-checked every step; polling SG_RESULT over the shared UART bus instead
-was tried first and was too noisy in practice to use directly - see
-TROUBLESHOOTING.md. When DIAG trips mid-move, MIN/MAX auto-clamps to
-the real position it stalled at and the axis reverses, instead of
-grinding against the stop. SGTHRS (0-255, higher trips more easily)
-still needs tuning by hand for your actual mechanics/speed via the
-UART-side TCOOLTHRS/SGTHRS registers - there's no universal default.
+Y and Z have no physical endstops - HOME finds the mechanical limit via
+the TMC2209's StallGuard: SG_RESULT is polled over UART (~every 100ms)
+during the homing move, using a reduced current and forced spreadCycle
+just for that move, since StallGuard's signal is too noisy under
+stealthChop to trust otherwise (see TROUBLESHOOTING.md). HOME
+deliberately drives toward one end (DEC = decreasing position, INC =
+increasing) until SG_RESULT drops below SGTHRS. A stall toward DEC sets
+MIN to that position, toward INC sets MAX. Direction/speed given are
+remembered (Y defaults to DEC, Z to INC, both at 1000 steps/sec) -
+"Y HOME" alone reuses whatever was last set. SGTHRS is a raw SG_RESULT
+floor here (not the doubled on-chip register comparison) and needs
+tuning by hand for your actual mechanics/speed.
 
-HOME deliberately drives toward one end until it stalls (instead of
-waiting for that to happen during normal bouncing), for an initial
-calibration before the first START. DEC = decreasing position, INC =
-increasing. Direction and speed given are remembered (Y defaults to
-DEC, Z to INC, both at 1000 steps/sec) - "Y HOME" alone reuses whatever
-was last set. A stall toward DEC sets MIN to that position, toward INC
-sets MAX.
+This is a one-shot calibration, run once before the first START - like
+Klipper/Voron-style sensorless homing, ordinary bouncing afterward does
+NOT re-check StallGuard on every move (it runs stealthChop at full
+current for quiet continuous motion, where the signal isn't reliable
+enough to act on).
 
     A MIN <deg>
     A MAX <deg>
@@ -84,8 +83,10 @@ y_motor = TMC2209(stepper_bus, ADDR_Y, step_pin=6, dir_pin=5, en_pin=7)
 z_motor = TMC2209(stepper_bus, ADDR_Z, step_pin=19, dir_pin=28, en_pin=2)
 
 # ---- StallGuard DIAG pins (Y-STOP/Z-STOP headers, board switch set to route
-# each driver's DIAG output there instead of a mechanical endstop) - a fast
-# GPIO read, unlike polling SG_RESULT over the shared UART bus every N steps ----
+# each driver's DIAG output there instead of a mechanical endstop). Not
+# currently used for homing - see TROUBLESHOOTING.md: a confirmed-working
+# reference detects stalls by polling SG_RESULT over UART instead, which is
+# what home_axis() does. Kept declared/wired for future diagnostics. ----
 y_diag = Pin(3, Pin.IN, Pin.PULL_DOWN)
 z_diag = Pin(25, Pin.IN, Pin.PULL_DOWN)
 
@@ -96,9 +97,11 @@ servo = ST3215(servo_bus, servo_id=1)
 X_CURRENT_MA = 800
 Y_CURRENT_MA = 800
 Z_CURRENT_MA = 800
-HOME_CURRENT_MA = 400  # StallGuard senses more cleanly at a reduced current during
-                        # homing specifically (Voron's sensorless-homing guide uses
-                        # ~0.49A vs a higher run current) - restored after homing
+HOME_CURRENT_MA = 830  # matches IRUN=14 in a confirmed-working hand-stall test
+                        # (google_test_stall_guard.py) on this exact hardware, via
+                        # our own current-scale formula. 400 (a generic "lower is
+                        # cleaner for homing" guess, not measured on this hardware)
+                        # was tried first and computed out to CS~6, far below that.
 
 CYCLE_DEFAULT_MINUTES = 5
 HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google_test_stall_guard.py:
@@ -108,20 +111,20 @@ HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SG
 
 state = {
     "x": {"running": False, "speed": 200},
-    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 100,
+    "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
           "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT},
-    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 100,
+    "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
           "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
 
-STALL_SETTLE_STEPS = 40  # the DIAG pin (like SG_RESULT) isn't meaningful until the motor
-                          # has been moving a little while - ignore it right after a stop/
-                          # reversal, or every reversal false-trips on the ramp-up transient
-STALL_CONFIRM_COUNT = 3  # cheap insurance against a single-sample glitch, now that checking
-                          # is a plain GPIO read (every step) instead of a UART round-trip.
-                          # (Polling SG_RESULT over UART every 10 steps proved too noisy on
-                          # real hardware to use directly - see TROUBLESHOOTING.md.)
+RAMP_START_SPEED = 100  # steps/sec - gentle starting speed for home_axis's ramp-up
+RAMP_STEPS = 100  # steps over which home_axis linearly ramps from RAMP_START_SPEED to
+                   # the target home speed, before StallGuard checking even begins
+STALL_SETTLE_STEPS = 40  # SG_RESULT isn't meaningful until the motor has been moving a
+                          # little while - ignore it right after the ramp-up completes
+STALL_CONFIRM_COUNT = 3  # cheap insurance against a single noisy SG_RESULT sample -
+                          # require this many consecutive ~100ms checks below SGTHRS
 
 # ---- persisted MIN/MAX/SPEED/SGTHRS/HOME_*, saved to/loaded from a file at the board root ----
 CONFIG_FILE = "rig_config.json"
@@ -206,18 +209,16 @@ async def x_task():
             await asyncio.sleep_ms(20)
 
 
-async def bounce_task(motor, state_key, diag_pin):
+async def bounce_task(motor, state_key):
     """Drives Y or Z: bounces back and forth between state["min"]/state["max"].
 
-    No physical endstops - the TMC2209 DIAG pin (wired to the Y-STOP/Z-STOP
-    header via the board's switch) stands in for one: a real stall pulls it
-    high. Checked every step (it's a plain GPIO read, unlike polling
-    SG_RESULT over UART - see TROUBLESHOOTING.md for why that wasn't good
-    enough on its own). A confirmed stall clamps MIN/MAX to wherever it
-    actually happened and reverses, instead of grinding against the stop.
+    No live StallGuard/DIAG check here - that only works reliably under
+    spreadCycle + reduced current (see home_axis and TROUBLESHOOTING.md),
+    not the stealthChop + full run current this uses for quiet continuous
+    motion. Establishing MIN/MAX is HOME's job, done once before the first
+    START, same as Klipper/Voron-style sensorless homing - not something
+    re-checked on every bounce.
     """
-    steps_since_reversal = 0
-    consecutive_stalls = 0
     while True:
         st = state[state_key]
         if st["running"]:
@@ -225,8 +226,6 @@ async def bounce_task(motor, state_key, diag_pin):
             if st["pos"] == target:
                 st["dir"] *= -1
                 target = st["max"] if st["dir"] == 1 else st["min"]
-                steps_since_reversal = 0
-                consecutive_stalls = 0
             step_dir = 1 if target > st["pos"] else -1
             motor.dir.value(1 if step_dir > 0 else 0)
             motor.step.value(1)
@@ -235,32 +234,16 @@ async def bounce_task(motor, state_key, diag_pin):
             period_ms = max(1, int(1000 / max(1, st["speed"])))  # uasyncio here has no sleep_us
             await asyncio.sleep_ms(period_ms)
             st["pos"] += step_dir
-            steps_since_reversal += 1
-
-            if steps_since_reversal >= STALL_SETTLE_STEPS:
-                consecutive_stalls = consecutive_stalls + 1 if diag_pin.value() else 0
-                if consecutive_stalls >= STALL_CONFIRM_COUNT:
-                    print(state_key.upper(), "DIAG tripped at pos=%d (%s)" %
-                          (st["pos"], "MAX" if step_dir > 0 else "MIN"))
-                    if step_dir > 0:
-                        st["max"] = st["pos"]
-                    else:
-                        st["min"] = st["pos"]
-                    st["dir"] *= -1
-                    steps_since_reversal = 0
-                    consecutive_stalls = 0
-                    save_config()
         else:
-            steps_since_reversal = 0
-            consecutive_stalls = 0
             await asyncio.sleep_ms(20)
 
 
-async def home_axis(motor, state_key, diag_pin):
+async def home_axis(motor, state_key):
     """Deliberately drives toward state["home_dir"] at state["home_speed"]
-    until the DIAG pin trips, then sets MIN (DEC) or MAX (INC) to where it
-    stopped. Meant for an explicit "Y HOME"/"Z HOME" console command, run
-    once before the axis is first START-ed - not part of normal bouncing.
+    until SG_RESULT (polled over UART) drops below SGTHRS, then sets MIN
+    (DEC) or MAX (INC) to where it stopped. Meant for an explicit
+    "Y HOME"/"Z HOME" console command, run once before the axis is first
+    START-ed - not part of normal bouncing.
     """
     st = state[state_key]
     if st["running"]:
@@ -269,7 +252,8 @@ async def home_axis(motor, state_key, diag_pin):
 
     direction = st["home_dir"]
     speed = st["home_speed"]
-    period_ms = max(1, int(1000 / max(1, speed)))
+    target_period_ms = max(1, int(1000 / max(1, speed)))
+    start_period_ms = max(1, int(1000 / RAMP_START_SPEED))
     motor.dir.value(1 if direction > 0 else 0)
     print(state_key.upper(), "homing %s at %d steps/sec..." %
           ("INC" if direction > 0 else "DEC", speed))
@@ -284,7 +268,17 @@ async def home_axis(motor, state_key, diag_pin):
     try:
         steps_since_start = 0
         consecutive_stalls = 0
-        for _ in range(HOME_SAFETY_MAX_STEPS):
+        last_check_ms = time.ticks_ms()
+        for i in range(HOME_SAFETY_MAX_STEPS):
+            # Linear ramp from RAMP_START_SPEED up to the target speed over
+            # RAMP_STEPS steps - jumping straight to full speed from a stop
+            # can itself cause the motor to briefly miss steps, which looks
+            # exactly like a stall to StallGuard.
+            if i < RAMP_STEPS:
+                period_ms = int(start_period_ms +
+                                 (target_period_ms - start_period_ms) * i / RAMP_STEPS)
+            else:
+                period_ms = target_period_ms
             motor.step.value(1)
             time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
             motor.step.value(0)
@@ -292,15 +286,26 @@ async def home_axis(motor, state_key, diag_pin):
             st["pos"] += direction
             steps_since_start += 1
 
-            if steps_since_start >= STALL_SETTLE_STEPS:
-                consecutive_stalls = consecutive_stalls + 1 if diag_pin.value() else 0
+            # Polling SG_RESULT is a UART round-trip - too slow to do every step,
+            # and (per a confirmed-working reference script) it's what actually
+            # detects a real stall reliably here, unlike the DIAG pin (see
+            # TROUBLESHOOTING.md). ~100ms matches that reference's cadence.
+            if (steps_since_start >= RAMP_STEPS + STALL_SETTLE_STEPS and
+                    time.ticks_diff(time.ticks_ms(), last_check_ms) >= 100):
+                last_check_ms = time.ticks_ms()
+                try:
+                    sg = motor.read_stallguard_result()
+                    stalled = sg < st["sgthrs"]
+                except OSError:
+                    stalled = False  # transient UART hiccup - just skip this check
+                consecutive_stalls = consecutive_stalls + 1 if stalled else 0
                 if consecutive_stalls >= STALL_CONFIRM_COUNT:
                     if direction > 0:
                         st["max"] = st["pos"]
                     else:
                         st["min"] = st["pos"]
                     save_config()
-                    print(state_key.upper(), "homed, pos=%d" % st["pos"])
+                    print(state_key.upper(), "homed, pos=%d (SG_RESULT=%d)" % (st["pos"], sg))
                     return
 
         print(state_key.upper(), "HOME failed: StallGuard never tripped after",
@@ -450,8 +455,7 @@ def _dispatch_command(line):
                 axis["home_speed"] = int(parts[idx])
                 persist = True
             motor = y_motor if cmd == "Y" else z_motor
-            diag_pin = y_diag if cmd == "Y" else z_diag
-            asyncio.create_task(home_axis(motor, cmd.lower(), diag_pin))
+            asyncio.create_task(home_axis(motor, cmd.lower()))
         elif sub == "MIN" and len(parts) >= 3 and cmd == "A":
             axis["min_deg"] = float(parts[2])
             persist = True
@@ -491,7 +495,7 @@ async def main():
     setup_motors()
     print_status()
     print("ready - type HELP for commands")
-    await asyncio.gather(x_task(), bounce_task(y_motor, "y", y_diag), bounce_task(z_motor, "z", z_diag),
+    await asyncio.gather(x_task(), bounce_task(y_motor, "y"), bounce_task(z_motor, "z"),
                           servo_task(), console_task())
 
 
