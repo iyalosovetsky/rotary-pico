@@ -55,8 +55,8 @@ Commands are sent one per line over the console (REPL):
 | `X MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
 | `X CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
 | `X TMC` | TMC2209 driver health: faults, live current, microsteps, mode (see below) |
-| `Y MIN <steps>` | Lower limit of carriage travel (microsteps) |
-| `Y MAX <steps>` | Upper limit of carriage travel (microsteps) |
+| `Y MIN <mm>` | Lower limit of carriage travel, in millimeters (via `LEAD`) - default 0 |
+| `Y MAX <mm>` | Upper limit of carriage travel, in millimeters (via `LEAD`) - default 4 |
 | `Y SPEED <steps_per_sec>` | Carriage speed |
 | `Y SGTHRS <0-255>` | StallGuard sensorless-homing threshold (see below) - higher trips more easily |
 | `Y HOME [DEC\|INC] [speed]` | One-shot calibration: home toward a StallGuard stall (see below) |
@@ -68,8 +68,8 @@ Commands are sent one per line over the console (REPL):
 | `Y TMC` | TMC2209 driver health: faults, live current, microsteps, mode (see below) |
 | `Y START` | Start cyclic motion between `MIN` and `MAX` |
 | `Y STOP` | Stop the carriage |
-| `Z MIN <steps>` | Lower limit of Z travel (microsteps) |
-| `Z MAX <steps>` | Upper limit of Z travel (microsteps) |
+| `Z MIN <mm>` | Lower limit of Z travel, in millimeters (via `LEAD`) - default 0 |
+| `Z MAX <mm>` | Upper limit of Z travel, in millimeters (via `LEAD`) - default 4 |
 | `Z SPEED <steps_per_sec>` | Z axis speed |
 | `Z SGTHRS <0-255>` | StallGuard sensorless-homing threshold (see below) - higher trips more easily |
 | `Z HOME [DEC\|INC] [speed]` | One-shot calibration: home toward a StallGuard stall (see below) |
@@ -149,7 +149,7 @@ This is a one-shot calibration - run `HOME` once before the first `START`, the w
 
 `Y`/`Z MOVE` takes a distance in millimeters, converted to motor steps via that axis's `LEAD` (millimeters per lead-screw revolution - depends on your actual hardware, so it's configurable, default 4mm) and that axis's own `MICROSTEPS` setting (see below). `X MOVE` takes an angle in degrees instead, since X turns the turntable directly rather than driving a screw. `A MOVE` also takes degrees, but unlike the open-loop stepper axes, it reads the servo's own absolute position feedback and issues a single absolute goal instead of counting steps.
 
-All four `MOVE` commands are one-shot and require the axis not already running/bouncing. Given a number, `MOVE` is a signed relative move from the current position - clamped to `MIN`/`MAX` for Y/Z/A, but **not** for X: X is continuous rotation, so a plain numeric `X MOVE` is deliberately unbounded, letting multi-revolution moves like `X MOVE 720` (two full turns) through untouched. Given `MIN`, `MAX`, or `MID` instead of a number, all four axes go straight to that limit (or the midpoint between them) from wherever they currently are - an absolute move, not a relative one; this is the only thing X's own `MIN`/`MAX` (in degrees, default 0/180 so `MID` = 90) are used for.
+All four `MOVE` commands are one-shot and require the axis not already running/bouncing. Given a number, `MOVE` is a signed relative move from the current position - clamped to `MIN`/`MAX` for Y/Z/A (`MIN`/`MAX` are millimeters for Y/Z, same as `MOVE`, and degrees for A), but **not** for X: X is continuous rotation, so a plain numeric `X MOVE` is deliberately unbounded, letting multi-revolution moves like `X MOVE 720` (two full turns) through untouched. Given `MIN`, `MAX`, or `MID` instead of a number, all four axes go straight to that limit (or the midpoint between them) from wherever they currently are - an absolute move, not a relative one; this is the only thing X's own `MIN`/`MAX` (in degrees, default 0/180 so `MID` = 90) are used for.
 
 ### Microstepping and current (MICROSTEPS, CURRENT)
 
