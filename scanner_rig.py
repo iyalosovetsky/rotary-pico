@@ -8,8 +8,8 @@ Raptor-style 3D scanner rig.
 
 Console commands (G-code-like, one per line):
 
-MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
-"Y MIN 0") prints that field's current value instead of setting it.
+MIN/MAX/SPEED/SGTHRS/LEAD/MICROSTEPS/CURRENT with no value ("Y MIN",
+not "Y MIN 0") prints that field's current value instead of setting it.
 
     START [minutes]             start ALL axes at once, auto-stop after
                                  [minutes] (default 5) using each axis's
@@ -263,6 +263,7 @@ _QUERYABLE_FIELDS = {
     "MAX": {"X": "max_deg", "Y": "max_mm", "Z": "max_mm", "A": "max_deg"},
     "SPEED": {"X": "speed", "Y": "speed", "Z": "speed", "A": "speed"},
     "SGTHRS": {"Y": "sgthrs", "Z": "sgthrs"},
+    "LEAD": {"Y": "lead_mm", "Z": "lead_mm"},
     "MICROSTEPS": {"X": "microsteps", "Y": "microsteps", "Z": "microsteps"},
     "CURRENT": {"X": "current_ma", "Y": "current_ma", "Z": "current_ma"},
 }
