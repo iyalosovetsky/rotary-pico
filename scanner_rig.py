@@ -14,7 +14,9 @@ not "Y MIN 0") prints that field's current value instead of setting it.
     START [minutes]             start ALL axes at once, auto-stop after
                                  [minutes] (default 5) using each axis's
                                  already-configured SPEED/MIN/MAX/etc
-    STOP                        stop all axes immediately
+    STOP                        stop all axes immediately, including an
+                                 in-progress X/Y/Z MOVE or HOME (not just
+                                 START-ed bouncing/rotation)
     SLEEP                       stop everything, disable X/Y/Z drivers and
                                  release servo torque - see below
     WAKE                        undo SLEEP by hand - see below
@@ -538,9 +540,9 @@ async def home_axis(motor, state_key):
             motor.step.value(1)
             time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
             motor.step.value(0)
+            st["pos"] += direction  # before the await: if STOP cancels this task
+            steps_since_start += 1  # while it's asleep, the step already pulsed still counts
             await asyncio.sleep_ms(period_ms)
-            st["pos"] += direction
-            steps_since_start += 1
 
             # Polling SG_RESULT is a UART round-trip - too slow to do every step,
             # and (per a confirmed-working reference script) it's what actually
@@ -606,8 +608,8 @@ async def move_linear_axis(motor, state_key, distance_mm):
         motor.step.value(1)
         time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
         motor.step.value(0)
+        st["pos"] += direction  # before the await: a STOP-cancelled step still counts
         await asyncio.sleep_ms(period_ms)
-        st["pos"] += direction
     print(state_key.upper(), "moved %.4gmm (%d steps), pos=%d" % (distance_mm, steps, st["pos"]))
 
 
@@ -647,8 +649,8 @@ async def move_linear_axis_to(motor, state_key, pseudo):
         motor.step.value(1)
         time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
         motor.step.value(0)
+        st["pos"] += direction  # before the await: a STOP-cancelled step still counts
         await asyncio.sleep_ms(period_ms)
-        st["pos"] += direction
     print(state_key.upper(), "moved to", pseudo, "(%d steps), pos=%d" % (steps, st["pos"]))
 
 
@@ -680,8 +682,8 @@ async def rotate_x(degrees):
         x_motor.step.value(1)
         time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
         x_motor.step.value(0)
+        st["pos"] += direction  # before the await: a STOP-cancelled step still counts
         await asyncio.sleep_ms(period_ms)
-        st["pos"] += direction
     print("X moved %.4g deg (%d steps), pos=%d" % (degrees, steps, st["pos"]))
 
 
@@ -718,8 +720,8 @@ async def rotate_x_to(pseudo):
         x_motor.step.value(1)
         time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
         x_motor.step.value(0)
+        st["pos"] += direction  # before the await: a STOP-cancelled step still counts
         await asyncio.sleep_ms(period_ms)
-        st["pos"] += direction
     print("X moved to", pseudo, "(%d steps), pos=%d" % (steps, st["pos"]))
 
 
@@ -914,6 +916,23 @@ def print_status():
 
 _cycle_task = None
 
+# ---- one-shot MOVE/HOME tasks (X/Y/Z) aren't gated by state[key]["running"] at
+# all - that flag is bounce_task/x_task/servo_task's "cycling" mode, and MOVE/HOME
+# deliberately run *instead* of that (see their own docstrings), stepping straight
+# through to completion once started. Without tracking the task itself, STOP had
+# nothing to actually stop: it only ever touched "running", which these one-shot
+# moves never looked at, so "Y MOVE -30" followed by "Y STOP" let the move finish
+# untouched. This dict + _cancel_move_task() is what STOP/stop_all() use instead. ----
+_move_tasks = {"x": None, "y": None, "z": None}
+
+
+def _cancel_move_task(key):
+    task = _move_tasks.get(key)
+    if task is not None and not task.done():
+        task.cancel()
+        print(key.upper(), "MOVE/HOME cancelled")
+    _move_tasks[key] = None
+
 
 async def _cycle_timer(duration_s):
     await asyncio.sleep(duration_s)
@@ -936,6 +955,8 @@ def start_all(duration_minutes=None):
 def stop_all():
     for key in ("x", "y", "z", "a"):
         state[key]["running"] = False
+    for key in ("x", "y", "z"):
+        _cancel_move_task(key)
     save_config()  # checkpoint X/Y/Z's pos right away instead of waiting for the next autosave
     print("ok STOP - all axes stopped")
 
@@ -1018,6 +1039,8 @@ def _dispatch_command(line):
             axis["running"] = True
         elif sub == "STOP":
             axis["running"] = False
+            if cmd in ("X", "Y", "Z"):
+                _cancel_move_task(cmd.lower())
             persist = True  # checkpoint X/Y/Z's pos right away instead of waiting for autosave
         elif sub == "ZERO" and cmd in ("X", "Y", "Z"):
             zero_position(cmd.lower())
@@ -1055,15 +1078,17 @@ def _dispatch_command(line):
             motor = y_motor if cmd == "Y" else z_motor
             target = parts[2].upper()
             if target in PSEUDO_POSITIONS:
-                asyncio.create_task(move_linear_axis_to(motor, cmd.lower(), target))
+                _move_tasks[cmd.lower()] = asyncio.create_task(
+                    move_linear_axis_to(motor, cmd.lower(), target))
             else:
-                asyncio.create_task(move_linear_axis(motor, cmd.lower(), float(parts[2])))
+                _move_tasks[cmd.lower()] = asyncio.create_task(
+                    move_linear_axis(motor, cmd.lower(), float(parts[2])))
         elif sub == "MOVE" and len(parts) >= 3 and cmd == "X":
             target = parts[2].upper()
             if target in PSEUDO_POSITIONS:
-                asyncio.create_task(rotate_x_to(target))
+                _move_tasks["x"] = asyncio.create_task(rotate_x_to(target))
             else:
-                asyncio.create_task(rotate_x(float(parts[2])))
+                _move_tasks["x"] = asyncio.create_task(rotate_x(float(parts[2])))
         elif sub == "MOVE" and len(parts) >= 3 and cmd == "A":
             target = parts[2].upper()
             if target in PSEUDO_POSITIONS:
@@ -1080,7 +1105,7 @@ def _dispatch_command(line):
                 axis["home_speed"] = int(parts[idx])
                 persist = True
             motor = y_motor if cmd == "Y" else z_motor
-            asyncio.create_task(home_axis(motor, cmd.lower()))
+            _move_tasks[cmd.lower()] = asyncio.create_task(home_axis(motor, cmd.lower()))
         elif sub == "MIN" and len(parts) >= 3 and cmd in ("X", "A"):
             axis["min_deg"] = float(parts[2])
             persist = True
