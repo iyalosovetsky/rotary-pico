@@ -165,7 +165,7 @@ Both are useful for catching a motor/servo that's silently drawing less current 
 
 ### Position tracking
 
-X/Y/Z have no position sensor - their `pos` is just an open-loop step count. It's checkpointed to `rig_config.json` periodically while it's changing, and immediately whenever an axis is stopped, so a reboot doesn't lose track of where the mechanism physically is (it isn't saved on every single step, to avoid excessive flash writes). A doesn't need this: the ST3215 servo always reports its own true absolute angle over UART, so `STATUS` just reads it live.
+X/Y/Z have no position sensor - their `pos` is just an open-loop step count. It's checkpointed to `rig_config.json` every 10 minutes while it's changing, and immediately whenever an axis is stopped or the rig goes to `SLEEP`, so a reboot doesn't lose track of where the mechanism physically is. That interval is long on purpose: writing to flash blocks the whole program for 50-100+ms (measured on real hardware) - MicroPython's flash writes are synchronous, so nothing else (including the step timing of whatever's moving) can run until it returns. At a much shorter interval this was a felt stutter during continuous motion; `STOP`/`SLEEP` cover the common "about to sit idle" case immediately instead of waiting on the timer. A doesn't need any of this: the ST3215 servo always reports its own true absolute angle over UART, so `STATUS` just reads it live.
 
 ### Idle power-down (SLEEP, WAKE)
 
