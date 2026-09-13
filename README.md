@@ -28,6 +28,13 @@ The project was inspired by the [Creality Raptor Turntable](https://www.youtube.
 | `freecad/` | Own FreeCAD models (stepper motor, servo mount) |
 | `table_models/` | Turntable models (STEP) from the inspiring video's author |
 
+### Documentation
+
+- [TMC2209_REGISTERS.md](TMC2209_REGISTERS.md) - every TMC2209 register this codebase uses, bit layouts, and a link to the datasheet
+- [ST3215_REGISTERS.md](ST3215_REGISTERS.md) - every ST3215 register this codebase uses, units/scaling, and links to the datasheet
+- [PINOUT.md](PINOUT.md) - BTT SKR Pico pin/header reference for this rig's wiring
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - debugging log: bugs found, dead ends ruled out, current open issues
+
 ## 2. Command reference
 
 Commands are sent one per line over the console (REPL):
