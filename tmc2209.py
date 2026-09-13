@@ -200,6 +200,64 @@ class TMC2209:
         is only meaningful above the coolstep-configured minimum speed."""
         return self.read_stallguard_result() <= sgthrs * 2
 
+    def read_gstat(self):
+        """GSTAT (0x01): reset/drv_err/uv_cp - see diag_summary()."""
+        return self.read(REG_GSTAT) & 0x07
+
+    def clear_gstat(self):
+        """GSTAT is read+write-clear: writing 1 to a bit clears it. Without
+        this, "reset" stays set forever after the first read post-power-up,
+        making every later diag_summary() falsely claim a fresh reset."""
+        self.write(REG_GSTAT, 0x07)
+
+    def read_drv_status(self):
+        """DRV_STATUS (0x6F): fault flags + CS_ACTUAL + mode/standstill -
+        see diag_summary(). Raw register, bit positions per the TMC2209
+        datasheet section 5.5.3."""
+        return self.read(REG_DRV_STATUS)
+
+    def diag_summary(self):
+        """Human-readable driver health check: decodes GSTAT + DRV_STATUS
+        per the TMC2209 datasheet (GSTAT bits in the general config table,
+        DRV_STATUS in section 5.5.3). Meant for an interactive console
+        status command - code that needs to act on a specific flag should
+        read the registers directly instead of parsing this string.
+        Clears GSTAT after reading (see clear_gstat).
+        """
+        gstat = self.read_gstat()
+        self.clear_gstat()
+        drv = self.read_drv_status()
+
+        flags = []
+        if gstat & (1 << 0):
+            flags.append("RESET")
+        if gstat & (1 << 1):
+            flags.append("DRV_ERR")
+        if gstat & (1 << 2):
+            flags.append("UV_CP")
+        if drv & (1 << 0):
+            flags.append("OTPW")  # overtemperature pre-warning
+        if drv & (1 << 1):
+            flags.append("OT")  # overtemperature shutdown
+        if drv & (1 << 2):
+            flags.append("S2GA")  # short to ground, phase A
+        if drv & (1 << 3):
+            flags.append("S2GB")  # short to ground, phase B
+        if drv & (1 << 4):
+            flags.append("S2VSA")  # low-side short, phase A
+        if drv & (1 << 5):
+            flags.append("S2VSB")  # low-side short, phase B
+        if drv & (1 << 6):
+            flags.append("OLA")  # open load, phase A (informative only - can
+        if drv & (1 << 7):        # false-trigger during fast motion/standstill,
+            flags.append("OLB")  # per the datasheet - check during slow motion
+
+        cs_actual = (drv >> 16) & 0x1F
+        mode = "stealthChop" if (drv & (1 << 30)) else "spreadCycle"
+        standstill = "yes" if (drv & (1 << 31)) else "no"
+        status = "OK" if not flags else "ERROR(%s)" % ",".join(flags)
+        return "%s cs_actual=%d mode=%s standstill=%s" % (status, cs_actual, mode, standstill)
+
     def move(self, steps, step_delay_us=800):
         """Simple blocking STEP/DIR move - fine for bench testing."""
         self.dir.value(1 if steps >= 0 else 0)
