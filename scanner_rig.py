@@ -16,12 +16,16 @@ Console commands (G-code-like, one per line):
     X SPEED <steps_per_sec>     signed: sign sets direction, 0 = stopped
     X START [CW|CCW]           direction optional, defaults to CW (or last-used)
     X STOP
+    X MOVE <deg>                one-shot relative rotation (signed), axis must
+                                 be stopped first - see below
 
     Y MIN <steps>
     Y MAX <steps>
     Y SPEED <steps_per_sec>     unsigned
     Y SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Y HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
+    Y LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
+    Y MOVE <mm>                 one-shot relative move (signed) - see below
     Y START
     Y STOP
 
@@ -30,6 +34,8 @@ Console commands (G-code-like, one per line):
     Z SPEED <steps_per_sec>     unsigned
     Z SGTHRS <0-255>            StallGuard sensorless-homing threshold, needs tuning
     Z HOME [DEC|INC] [speed]    home toward a StallGuard stall - see below
+    Z LEAD <mm>                 lead screw pitch (mm per screw revolution), for MOVE
+    Z MOVE <mm>                 one-shot relative move (signed) - see below
     Z START
     Z STOP
 
@@ -52,9 +58,25 @@ NOT re-check StallGuard on every move (it runs stealthChop at full
 current for quiet continuous motion, where the signal isn't reliable
 enough to act on).
 
+Y/Z MOVE takes a distance in millimeters, converted to steps via each
+axis's LEAD (mm per screw revolution) and this rig's fixed
+motor/microstep count. X MOVE takes an angle in degrees instead - X
+turns the turntable directly (no screw), so its position is naturally
+angular; it's converted to steps the same way, using degrees instead
+of mm/lead. Both are one-shot open-loop moves at the axis's configured
+SPEED, signed (direction), and require the axis not already
+START-ed/bouncing. Y/Z MOVE clamps the target to MIN/MAX so it can't
+grind past a homed limit; X has no MIN/MAX (continuous rotation, no
+fixed reference) so it isn't clamped.
+
     A MIN <deg>
     A MAX <deg>
     A SPEED <raw_units>         servo-internal speed register, try 0-1000
+    A MOVE <deg>                one-shot relative move (signed), axis must
+                                 be stopped first - like Y/Z MOVE but in
+                                 degrees, using the servo's own absolute
+                                 position feedback instead of open-loop
+                                 step counting; clamped to MIN/MAX
     A START
     A STOP
 
@@ -103,6 +125,11 @@ HOME_CURRENT_MA = 830  # matches IRUN=14 in a confirmed-working hand-stall test
                         # cleaner for homing" guess, not measured on this hardware)
                         # was tried first and computed out to CS~6, far below that.
 
+FULL_STEPS_PER_REV = 200  # standard NEMA17, 1.8deg/step - matches every stepper used here
+MICROSTEPS = 16  # matches set_microsteps(MICROSTEPS) in setup_motors
+STEPS_PER_REV = FULL_STEPS_PER_REV * MICROSTEPS  # 3200 microsteps/rev - used by MOVE to
+                                                  # convert mm (via LEAD)/degrees to steps
+
 CYCLE_DEFAULT_MINUTES = 5
 HOME_SPEED_DEFAULT = 1000  # matches a confirmed-working hand-stall test (google_test_stall_guard.py:
                             # 500us pulse half-period = 1kHz). 150, then 500, then 3000 were all
@@ -112,9 +139,9 @@ HOME_SAFETY_MAX_STEPS = 20000  # guards against a stall that never trips (bad SG
 state = {
     "x": {"running": False, "speed": 200},
     "y": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
-          "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT},
+          "home_dir": -1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0},
     "z": {"running": False, "speed": 400, "min": 0, "max": 3200, "pos": 0, "dir": 1, "sgthrs": 20,
-          "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT},
+          "home_dir": 1, "home_speed": HOME_SPEED_DEFAULT, "lead_mm": 4.0},
     "a": {"running": False, "speed": 300, "min_deg": 30, "max_deg": 150},
 }
 
@@ -130,8 +157,8 @@ STALL_CONFIRM_COUNT = 3  # cheap insurance against a single noisy SG_RESULT samp
 CONFIG_FILE = "rig_config.json"
 _PERSISTED_FIELDS = {
     "x": ("speed",),
-    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed"),
-    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed"),
+    "y": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm"),
+    "z": ("min", "max", "speed", "sgthrs", "home_dir", "home_speed", "lead_mm"),
     "a": ("min_deg", "max_deg", "speed"),
 }
 
@@ -174,7 +201,7 @@ def setup_motors():
         m.check_connection()
         m.enable_uart_mode(spreadcycle=False)
         m.set_current(current)
-        m.set_microsteps(16)
+        m.set_microsteps(MICROSTEPS)
         m.enable_driver(True)
     # TCOOLTHRS is a MINIMUM-speed threshold: DIAG/StallGuard switches ON
     # above that speed (Trinamic datasheet: "lower threshold velocity for
@@ -315,6 +342,94 @@ async def home_axis(motor, state_key):
         motor.set_current(run_current_ma)
 
 
+async def move_linear_axis(motor, state_key, distance_mm):
+    """One-shot relative move of Y/Z by distance_mm (signed), converted to
+    steps via the axis's LEAD (mm/screw-revolution) and STEPS_PER_REV.
+    Like HOME, requires the axis not already bouncing. Clamps the target to
+    MIN/MAX so it can't grind past a homed limit.
+    """
+    st = state[state_key]
+    if st["running"]:
+        print(state_key.upper(), "MOVE: stop the axis first")
+        return
+
+    steps_per_mm = STEPS_PER_REV / st["lead_mm"]
+    target_pos = st["pos"] + round(distance_mm * steps_per_mm)
+    clamped_pos = max(st["min"], min(st["max"], target_pos))
+    if clamped_pos != target_pos:
+        print(state_key.upper(), "MOVE: clamped to MIN/MAX (%d instead of %d)" %
+              (clamped_pos, target_pos))
+    steps = abs(clamped_pos - st["pos"])
+    if steps == 0:
+        print(state_key.upper(), "MOVE: distance rounds to 0 steps, nothing to do")
+        return
+    direction = 1 if clamped_pos > st["pos"] else -1
+
+    speed = max(1, abs(st["speed"]))
+    period_ms = max(1, int(1000 / speed))
+    motor.dir.value(1 if direction > 0 else 0)
+    for _ in range(steps):
+        motor.step.value(1)
+        time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
+        motor.step.value(0)
+        await asyncio.sleep_ms(period_ms)
+        st["pos"] += direction
+    print(state_key.upper(), "moved %.4gmm (%d steps), pos=%d" % (distance_mm, steps, st["pos"]))
+
+
+async def rotate_x(degrees):
+    """One-shot relative rotation of X by degrees (signed), converted to
+    steps via STEPS_PER_REV. X has no MIN/MAX (continuous rotation, no
+    fixed reference), so unlike move_linear_axis there's nothing to clamp
+    against. Requires the axis not already running.
+    """
+    st = state["x"]
+    if st["running"]:
+        print("X MOVE: stop the axis first")
+        return
+
+    steps = round(abs(degrees) * STEPS_PER_REV / 360.0)
+    if steps == 0:
+        print("X MOVE: angle rounds to 0 steps, nothing to do")
+        return
+    direction = 1 if degrees > 0 else -1
+
+    speed = max(1, abs(st["speed"]) or 200)
+    period_ms = max(1, int(1000 / speed))
+    x_motor.dir.value(1 if direction > 0 else 0)
+    for _ in range(steps):
+        x_motor.step.value(1)
+        time.sleep_us(3)  # minimum STEP pulse width - brief enough not to matter
+        x_motor.step.value(0)
+        await asyncio.sleep_ms(period_ms)
+    print("X moved %.4g deg (%d steps)" % (degrees, steps))
+
+
+def move_servo(delta_deg):
+    """One-shot relative move of A by delta_deg (signed). Unlike Y/Z/X
+    (open-loop step counting), the servo reports its own absolute position,
+    so this reads that back and issues a single absolute goal instead of
+    counting steps. Clamped to MIN/MAX. Requires the axis not already
+    bouncing.
+    """
+    st = state["a"]
+    if st["running"]:
+        print("A MOVE: stop the axis first")
+        return
+    try:
+        current_deg = servo.read_position_deg()
+    except OSError as e:
+        print("A MOVE failed: could not read current position -", e)
+        return
+
+    target_deg = current_deg + delta_deg
+    clamped_deg = max(st["min_deg"], min(st["max_deg"], target_deg))
+    if clamped_deg != target_deg:
+        print("A MOVE: clamped to MIN/MAX (%.4g instead of %.4g)" % (clamped_deg, target_deg))
+    servo.set_goal_deg(clamped_deg, speed=st["speed"])
+    print("A moving %.4g -> %.4g deg" % (current_deg, clamped_deg))
+
+
 async def servo_task():
     going_to_max = True
     while True:
@@ -340,10 +455,10 @@ def print_status():
     x, y, z, a = state["x"], state["y"], state["z"], state["a"]
     print("X running=%s speed=%d dir=%s" %
           (x["running"], x["speed"], "CW" if x["speed"] >= 0 else "CCW"))
-    print("Y running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d" %
-          (y["running"], y["speed"], y["min"], y["max"], y["pos"], y["sgthrs"]))
-    print("Z running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d" %
-          (z["running"], z["speed"], z["min"], z["max"], z["pos"], z["sgthrs"]))
+    print("Y running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d lead_mm=%.4g" %
+          (y["running"], y["speed"], y["min"], y["max"], y["pos"], y["sgthrs"], y["lead_mm"]))
+    print("Z running=%s speed=%d min=%d max=%d pos=%d sgthrs=%d lead_mm=%.4g" %
+          (z["running"], z["speed"], z["min"], z["max"], z["pos"], z["sgthrs"], z["lead_mm"]))
     print("A running=%s speed=%d min_deg=%d max_deg=%d" %
           (a["running"], a["speed"], a["min_deg"], a["max_deg"]))
 
@@ -445,6 +560,16 @@ def _dispatch_command(line):
         elif sub == "SGTHRS" and len(parts) >= 3 and cmd in ("Y", "Z"):
             axis["sgthrs"] = int(parts[2])
             persist = True
+        elif sub == "LEAD" and len(parts) >= 3 and cmd in ("Y", "Z"):
+            axis["lead_mm"] = float(parts[2])
+            persist = True
+        elif sub == "MOVE" and len(parts) >= 3 and cmd in ("Y", "Z"):
+            motor = y_motor if cmd == "Y" else z_motor
+            asyncio.create_task(move_linear_axis(motor, cmd.lower(), float(parts[2])))
+        elif sub == "MOVE" and len(parts) >= 3 and cmd == "X":
+            asyncio.create_task(rotate_x(float(parts[2])))
+        elif sub == "MOVE" and len(parts) >= 3 and cmd == "A":
+            move_servo(float(parts[2]))
         elif sub == "HOME" and cmd in ("Y", "Z"):
             idx = 2
             if len(parts) > idx and parts[idx].upper() in ("DEC", "INC"):
