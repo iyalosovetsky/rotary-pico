@@ -158,7 +158,18 @@ percentage - the servo's own docs don't pin that down precisely).
     STATUS                      shows every axis's current position (X/Y/Z in
                                  steps + degrees/mm, A read live from the servo)
                                  alongside its config, plus whether SLEEPing
+                                 and each device's connection state - see below
     HELP
+
+STATUS's DEVICES line shows "ok" or "OFFLINE" for each of X/Y/Z/A - a
+device that doesn't respond at boot (not wired up yet, still powering
+on, etc.) no longer crashes the whole program: it's marked OFFLINE
+instead, and a background task retries initializing it every
+DEVICE_RETRY_INTERVAL_S (60s by default), printing "<axis> back
+online" the moment that succeeds - no reboot needed once it's actually
+reachable. Commands for an OFFLINE device still behave the same as any
+other UART hiccup (fail with "? command failed" rather than crashing),
+they just aren't expected to succeed until it comes back online.
 
 SLEEP disables the X/Y/Z drivers (EN pin - no holding current at all,
 quieter/cooler than just standing still) and releases the servo's
@@ -375,28 +386,94 @@ def load_config():
 load_config()
 
 
+# ---- per-device connection status, so a driver that's unwired/unpowered/not
+# yet booted shows up as a clear status instead of crashing the whole program -
+# see _init_stepper/init_servo and device_retry_task. Not persisted: this is
+# live connection state, not configuration. ----
+device_online = {"x": False, "y": False, "z": False, "a": False}
+
+DEVICE_RETRY_INTERVAL_S = 60  # how often device_retry_task retries an offline device
+
+
+def _init_stepper(key, motor):
+    """Initializes one TMC2209 driver. Returns True/False instead of letting
+    a genuinely absent/unpowered driver raise OSError straight out of
+    setup_motors() and crash the whole program at boot - see device_online
+    and device_retry_task, which is what actually gets a driver that shows
+    up late (still booting, or plugged in after this rig was powered on)
+    back to "online" without a reboot.
+    """
+    st = state[key]
+    for attempt in range(3):  # a couple of retries first - see TROUBLESHOOTING.md
+        try:                  # on the transient "no reply" bus errors seen here
+            motor.check_connection()
+            break
+        except OSError as e:
+            if attempt == 2:
+                device_online[key] = False
+                print("WARNING:", key.upper(), "TMC2209 not responding -", e,
+                      "- will retry every %ds (see STATUS)" % DEVICE_RETRY_INTERVAL_S)
+                return False
+            time.sleep_ms(50)
+    try:
+        motor.enable_uart_mode(spreadcycle=False)
+        motor.set_current(st["current_ma"])
+        motor.set_microsteps(st["microsteps"])
+        motor.enable_driver(True)
+        if key in ("y", "z"):
+            # TCOOLTHRS is a MINIMUM-speed threshold: DIAG/StallGuard switches ON
+            # above that speed (Trinamic datasheet: "lower threshold velocity for
+            # switching on..."). Max value = active at any practical speed. (An
+            # earlier attempt set this low thinking it meant the opposite, which
+            # likely disabled DIAG entirely at our real bounce/home speeds - see
+            # TROUBLESHOOTING.md.)
+            motor.enable_stallguard(st["sgthrs"], tcoolthrs=0xFFFFF)
+    except Exception as e:  # noqa: broad on purpose - e.g. a hand-edited rig_config.json
+                             # with a bad "microsteps" raises ValueError here, not OSError,
+                             # and a boot-time failure must never be allowed to crash the
+                             # whole program (see device_online/device_retry_task)
+        device_online[key] = False
+        print("WARNING:", key.upper(), "TMC2209 connected but setup failed -", e,
+              "- will retry every %ds (see STATUS)" % DEVICE_RETRY_INTERVAL_S)
+        return False
+    device_online[key] = True
+    return True
+
+
+def _init_servo():
+    try:
+        if servo.ping():
+            servo.torque_enable(True)  # can itself OSError even though ping() just
+            device_online["a"] = True  # succeeded - a transient bus hiccup, not
+            return True                # necessarily "not connected"
+    except OSError:
+        pass
+    device_online["a"] = False
+    print("WARNING: servo did not respond - check wiring/id, A commands will fail",
+          "- will retry every %ds (see STATUS)" % DEVICE_RETRY_INTERVAL_S)
+    return False
+
+
 def setup_motors():
     for key, m in (("x", x_motor), ("y", y_motor), ("z", z_motor)):
-        m.check_connection()
-        m.enable_uart_mode(spreadcycle=False)
-        m.set_current(state[key]["current_ma"])
-        m.set_microsteps(state[key]["microsteps"])
-        m.enable_driver(True)
-    # TCOOLTHRS is a MINIMUM-speed threshold: DIAG/StallGuard switches ON
-    # above that speed (Trinamic datasheet: "lower threshold velocity for
-    # switching on..."). Max value = active at any practical speed. (An
-    # earlier attempt set this low thinking it meant the opposite, which
-    # likely disabled DIAG entirely at our real bounce/home speeds - see
-    # TROUBLESHOOTING.md.)
-    y_motor.enable_stallguard(state["y"]["sgthrs"], tcoolthrs=0xFFFFF)
-    z_motor.enable_stallguard(state["z"]["sgthrs"], tcoolthrs=0xFFFFF)
-    print("X/Y/Z drivers ready")
-
-    if servo.ping():
-        servo.torque_enable(True)
+        if _init_stepper(key, m):
+            print(key.upper(), "TMC2209 ready")
+    if _init_servo():
         print("servo ready")
-    else:
-        print("WARNING: servo did not respond to ping - check wiring/id, A commands will fail")
+
+
+async def device_retry_task():
+    """Periodically retries initializing any X/Y/Z/A device that wasn't
+    online yet - e.g. one that was still booting or unplugged when
+    setup_motors() first ran. See device_online/DEVICE_RETRY_INTERVAL_S.
+    """
+    while True:
+        await asyncio.sleep(DEVICE_RETRY_INTERVAL_S)
+        for key, m in (("x", x_motor), ("y", y_motor), ("z", z_motor)):
+            if not device_online[key] and _init_stepper(key, m):
+                print(key.upper(), "TMC2209 back online")
+        if not device_online["a"] and _init_servo():
+            print("servo back online")
 
 
 # ---------------- motion tasks ----------------
@@ -890,6 +967,9 @@ async def sleep_monitor_task():
 
 def print_status():
     print("SLEEP:", "yes (X/Y/Z drivers disabled, servo torque released)" if _sleeping else "no")
+    print("DEVICES: X=%s Y=%s Z=%s A=%s" % tuple(
+        "ok" if device_online[key] else "OFFLINE (retrying every %ds)" % DEVICE_RETRY_INTERVAL_S
+        for key in ("x", "y", "z", "a")))
     x, y, z, a = state["x"], state["y"], state["z"], state["a"]
     print("X running=%s speed=%d dir=%s pos=%d (%.4gdeg) min_deg=%.4g max_deg=%.4g "
           "microsteps=%d current_ma=%d" %
@@ -1147,7 +1227,7 @@ async def main():
     print("ready - type HELP for commands")
     await asyncio.gather(x_task(), bounce_task(y_motor, "y"), bounce_task(z_motor, "z"),
                           servo_task(), console_task(), position_autosave_task(),
-                          sleep_monitor_task())
+                          sleep_monitor_task(), device_retry_task())
 
 
 if __name__ == "__main__":
