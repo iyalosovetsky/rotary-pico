@@ -186,9 +186,14 @@ load on those axes here).
 
 X/Y/Z have no position sensor - "pos" is just an open-loop step count,
 so it's checkpointed to rig_config.json periodically while moving (see
-POSITION_AUTOSAVE_INTERVAL_S) and immediately on STOP, to survive a
-reboot. A doesn't need this: the ST3215 servo always reports its own
-true absolute angle over UART, so STATUS just reads it live instead.
+POSITION_AUTOSAVE_INTERVAL_S, 10 minutes by default) and immediately
+on STOP or SLEEP, to survive a reboot. The interval is long on purpose:
+writing to flash blocks the whole program for 50-100+ms, which is
+felt as a stutter in whatever's moving at the time, so it's kept rare
+- STOP/SLEEP cover the common "about to stop for a while" case
+immediately instead of waiting on it. A doesn't need any of this: the
+ST3215 servo always reports its own true absolute angle over UART, so
+STATUS just reads it live instead.
 
 Rename this file to main.py once you're happy with it, to have it run
 on boot. Left as scanner_rig.py for now so it doesn't clobber the
@@ -849,10 +854,21 @@ def move_servo_to(pseudo):
     print("A moving to", pseudo, "(%.4g deg)" % target_deg)
 
 
-POSITION_AUTOSAVE_INTERVAL_S = 10  # how often X/Y/Z's open-loop "pos" is checkpointed to
-                                    # flash while it's actually changing (bouncing, spinning,
-                                    # or mid-MOVE) - bounds how much a power cut can lose,
-                                    # without writing to flash on every single step
+POSITION_AUTOSAVE_INTERVAL_S = 10 * 60  # how often X/Y/Z's open-loop "pos" is checkpointed
+                                    # to flash while it's actually changing (bouncing,
+                                    # spinning, or mid-MOVE) - bounds how much a power cut
+                                    # can lose, without writing to flash on every step.
+                                    # save_config() itself blocks the whole event loop for
+                                    # 50-100+ms (measured on real hardware) - MicroPython's
+                                    # flash writes are synchronous, so uasyncio can't run
+                                    # anything else (including the step timing of whatever's
+                                    # moving) until it returns. That was a real, felt stutter
+                                    # during motion at the original 10s interval; 10 minutes
+                                    # makes it rare enough not to matter in practice. SLEEP
+                                    # (manual or automatic) checkpoints immediately on top of
+                                    # this - see enter_sleep() - covering the common case of
+                                    # "about to sit idle for a while" without waiting on this
+                                    # timer at all.
 
 
 async def position_autosave_task():
@@ -905,7 +921,10 @@ def enter_sleep():
     torque, to cut power/heat during a long idle stretch. Does NOT stop
     any axis first - callers that want a clean stop (the SLEEP command)
     should call stop_all() first; the auto-sleep monitor only ever fires
-    when everything's already stopped, so it doesn't need to.
+    when everything's already stopped, so it doesn't need to. Checkpoints
+    X/Y/Z's pos immediately, same as STOP - about to sit idle for a while
+    is exactly the moment to do that, rather than waiting on
+    POSITION_AUTOSAVE_INTERVAL_S (10 minutes).
     """
     global _sleeping, _pre_sleep_servo_deg
     if _sleeping:
@@ -918,6 +937,7 @@ def enter_sleep():
         _pre_sleep_servo_deg = None  # can't check for sag on wake, but sleep anyway
     servo.torque_enable(False)
     _sleeping = True
+    save_config()
     print("ok SLEEP - X/Y/Z drivers disabled, servo torque released")
 
 
