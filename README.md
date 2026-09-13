@@ -43,10 +43,14 @@ Commands are sent one per line over the console (REPL):
 |---|---|
 | `START [minutes]` | Start every axis at once (using whatever they're each already configured with), auto-stop after `minutes` (default 5) |
 | `STOP` | Stop every axis immediately |
+| `SLEEP` | Stop everything, disable the X/Y/Z drivers, release servo torque (see below) |
+| `WAKE` | Undo `SLEEP` by hand (see below) |
 | `X SPEED <steps_per_sec>` | Table rotation speed (sign sets direction, 0 = stopped) |
 | `X START [CW\|CCW]` | Start table rotation - direction optional, defaults to CW (or last-used) |
 | `X STOP` | Stop table rotation |
-| `X MOVE <deg>` | One-shot relative rotation by a signed angle - axis must be stopped first (X has no `MIN`/`MAX`, so `MIN`/`MAX`/`MID` don't apply and are rejected) |
+| `X MIN <deg>` | Default 0 - only used by `MOVE MIN`/`MID` (see below), not a limit on plain numeric `MOVE` |
+| `X MAX <deg>` | Default 180 - only used by `MOVE MAX`/`MID` (see below), not a limit on plain numeric `MOVE` |
+| `X MOVE <deg\|MIN\|MAX\|MID>` | A number is an unclamped signed relative rotation (multi-revolution moves like `720` are fine) - axis must be stopped first. `MIN`/`MAX`/`MID` go straight to that angle instead (see below) |
 | `X ZERO` | Make the current position 0 (see below) |
 | `X MICROSTEPS <n>` | Driver microstep resolution: one of 256/128/64/32/16/8/4/2/1 (see below) |
 | `X CURRENT <mA>` | Run current for this axis's driver (hold current is auto-derived as half) |
@@ -145,7 +149,7 @@ This is a one-shot calibration - run `HOME` once before the first `START`, the w
 
 `Y`/`Z MOVE` takes a distance in millimeters, converted to motor steps via that axis's `LEAD` (millimeters per lead-screw revolution - depends on your actual hardware, so it's configurable, default 4mm) and that axis's own `MICROSTEPS` setting (see below). `X MOVE` takes an angle in degrees instead, since X turns the turntable directly rather than driving a screw. `A MOVE` also takes degrees, but unlike the open-loop stepper axes, it reads the servo's own absolute position feedback and issues a single absolute goal instead of counting steps.
 
-All four `MOVE` commands are one-shot, require the axis not already running/bouncing, and (except X, which has no fixed reference to clamp against) clamp their target to `MIN`/`MAX` so they can't grind past a homed limit. Given a number, `MOVE` is relative (signed, from the current position). Given `MIN`, `MAX`, or `MID` instead, `Y`/`Z`/`A MOVE` go straight to that limit (or the midpoint between them) from wherever the axis currently is - an absolute move, not a relative one. X has no `MIN`/`MAX` at all, so `X MOVE MIN`/`MAX`/`MID` is rejected outright.
+All four `MOVE` commands are one-shot and require the axis not already running/bouncing. Given a number, `MOVE` is a signed relative move from the current position - clamped to `MIN`/`MAX` for Y/Z/A, but **not** for X: X is continuous rotation, so a plain numeric `X MOVE` is deliberately unbounded, letting multi-revolution moves like `X MOVE 720` (two full turns) through untouched. Given `MIN`, `MAX`, or `MID` instead of a number, all four axes go straight to that limit (or the midpoint between them) from wherever they currently are - an absolute move, not a relative one; this is the only thing X's own `MIN`/`MAX` (in degrees, default 0/180 so `MID` = 90) are used for.
 
 ### Microstepping and current (MICROSTEPS, CURRENT)
 
@@ -162,6 +166,14 @@ Both are useful for catching a motor/servo that's silently drawing less current 
 ### Position tracking
 
 X/Y/Z have no position sensor - their `pos` is just an open-loop step count. It's checkpointed to `rig_config.json` periodically while it's changing, and immediately whenever an axis is stopped, so a reboot doesn't lose track of where the mechanism physically is (it isn't saved on every single step, to avoid excessive flash writes). A doesn't need this: the ST3215 servo always reports its own true absolute angle over UART, so `STATUS` just reads it live.
+
+### Idle power-down (SLEEP, WAKE)
+
+`SLEEP` stops every axis, then disables the X/Y/Z TMC2209 drivers outright (their `EN` pin - no holding current at all, quieter and cooler than just standing still with the normal hold current) and releases the ST3215's torque. It happens either by typing `SLEEP` yourself, or automatically after 20 minutes with no console input at all and nothing running (checked periodically - it never fires while any axis is actually moving, no matter how stale the last-input time is).
+
+Any `START`, `MOVE`, or `HOME` command, for any axis, wakes everything back up first, the same as typing `WAKE` directly. Commands that don't cause movement (`SPEED`, `MIN`/`MAX`, `TMC`, `STATUS`, etc.) leave it asleep and still work fine - UART communication with the TMC2209s doesn't depend on the `EN` pin.
+
+Because a torque-less servo can sag under the weight of whatever it's holding, `WAKE` compares the servo's angle against what it was right before `SLEEP` and, if it moved by more than a degree, commands it back to where it was. X/Y/Z don't get this treatment: nothing in this rig loads them with enough gravity to drift while unpowered, and even if it did, there's no sensor on those axes to detect it - that's the whole reason `SLEEP` disables them rather than tracking drift the way it does for the servo.
 
 ## 3. Component list
 
