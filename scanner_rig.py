@@ -15,6 +15,9 @@ MIN/MAX/SPEED/SGTHRS/MICROSTEPS/CURRENT with no value ("Y MIN", not
                                  [minutes] (default 5) using each axis's
                                  already-configured SPEED/MIN/MAX/etc
     STOP                        stop all axes immediately
+    SLEEP                       stop everything, disable X/Y/Z drivers and
+                                 release servo torque - see below
+    WAKE                        undo SLEEP by hand - see below
 
     X SPEED <steps_per_sec>     signed: sign sets direction, 0 = stopped
     X START [CW|CCW]           direction optional, defaults to CW (or last-used)
@@ -151,8 +154,21 @@ percentage - the servo's own docs don't pin that down precisely).
 
     STATUS                      shows every axis's current position (X/Y/Z in
                                  steps + degrees/mm, A read live from the servo)
-                                 alongside its config
+                                 alongside its config, plus whether SLEEPing
     HELP
+
+SLEEP disables the X/Y/Z drivers (EN pin - no holding current at all,
+quieter/cooler than just standing still) and releases the servo's
+torque, after stopping every axis first. It happens automatically
+after SLEEP_TIMEOUT_S (20 minutes by default) of no console input at
+all with nothing running, or by typing SLEEP yourself. Any START,
+MOVE, or HOME command (for any axis) wakes it back up first, same as
+typing WAKE directly. Because a torque-less servo can sag under the
+weight of whatever it's holding, waking up compares the servo's
+position against what it was right before SLEEP and, if it moved by
+more than a degree, commands it back - X/Y/Z don't need this since
+their position doesn't drift without power (no significant gravity
+load on those axes here).
 
 X/Y/Z have no position sensor - "pos" is just an open-loop step count,
 so it's checkpointed to rig_config.json periodically while moving (see
@@ -736,9 +752,88 @@ async def servo_task():
             await asyncio.sleep_ms(50)
 
 
+# ---------------- sleep/wake ----------------
+
+SLEEP_TIMEOUT_S = 20 * 60  # auto-SLEEP after this long with nothing running and no
+                            # console input at all - see sleep_monitor_task
+SLEEP_CHECK_INTERVAL_S = 30  # how often sleep_monitor_task checks the idle timer
+SLEEP_SERVO_RESTORE_TOLERANCE_DEG = 1.0  # ignore a post-wake position difference this
+                                          # small - sensor noise, not real sag
+
+_sleeping = False
+_pre_sleep_servo_deg = None  # A's angle just before SLEEP, so WAKE can detect sag and
+                              # correct it - see enter_sleep/wake_up
+_last_activity_ms = None  # set on every console command - see _dispatch_command
+
+
+def enter_sleep():
+    """Disables the X/Y/Z drivers (EN pin high - no holding current at all,
+    unlike the normal IHOLD current-scale-down) and releases the servo's
+    torque, to cut power/heat during a long idle stretch. Does NOT stop
+    any axis first - callers that want a clean stop (the SLEEP command)
+    should call stop_all() first; the auto-sleep monitor only ever fires
+    when everything's already stopped, so it doesn't need to.
+    """
+    global _sleeping, _pre_sleep_servo_deg
+    if _sleeping:
+        return
+    for m in (x_motor, y_motor, z_motor):
+        m.enable_driver(False)
+    try:
+        _pre_sleep_servo_deg = servo.read_position_deg()
+    except OSError:
+        _pre_sleep_servo_deg = None  # can't check for sag on wake, but sleep anyway
+    servo.torque_enable(False)
+    _sleeping = True
+    print("ok SLEEP - X/Y/Z drivers disabled, servo torque released")
+
+
+def wake_up():
+    """Re-enables the X/Y/Z drivers and the servo's torque. Because a
+    torque-less servo can sag under the weight of whatever it's holding
+    (see the module's SLEEP docs), this also checks the servo's current
+    position against what it was right before SLEEP and, if it moved by
+    more than SLEEP_SERVO_RESTORE_TOLERANCE_DEG, commands it back - the
+    whole reason enter_sleep() bothers recording _pre_sleep_servo_deg.
+    """
+    global _sleeping, _pre_sleep_servo_deg
+    if not _sleeping:
+        return
+    for m in (x_motor, y_motor, z_motor):
+        m.enable_driver(True)
+    servo.torque_enable(True)
+    if _pre_sleep_servo_deg is not None:
+        try:
+            current_deg = servo.read_position_deg()
+            if abs(current_deg - _pre_sleep_servo_deg) > SLEEP_SERVO_RESTORE_TOLERANCE_DEG:
+                servo.set_goal_deg(_pre_sleep_servo_deg, speed=state["a"]["speed"])
+                print("A: sagged to %.4g deg while asleep, restoring to %.4g deg" %
+                      (current_deg, _pre_sleep_servo_deg))
+        except OSError:
+            pass  # can't verify - leave it wherever it is rather than guess
+    _sleeping = False
+    _pre_sleep_servo_deg = None
+    print("ok WAKE - X/Y/Z drivers and servo torque re-enabled")
+
+
+async def sleep_monitor_task():
+    global _last_activity_ms
+    _last_activity_ms = time.ticks_ms()
+    while True:
+        await asyncio.sleep(SLEEP_CHECK_INTERVAL_S)
+        if _sleeping:
+            continue
+        if any(state[key]["running"] for key in ("x", "y", "z", "a")):
+            continue  # something's actively moving - that's not "idle", however
+                       # stale _last_activity_ms is (see _dispatch_command)
+        if time.ticks_diff(time.ticks_ms(), _last_activity_ms) >= SLEEP_TIMEOUT_S * 1000:
+            enter_sleep()
+
+
 # ---------------- console ----------------
 
 def print_status():
+    print("SLEEP:", "yes (X/Y/Z drivers disabled, servo torque released)" if _sleeping else "no")
     x, y, z, a = state["x"], state["y"], state["z"], state["a"]
     print("X running=%s speed=%d dir=%s pos=%d (%.4gdeg) min_deg=%.4g max_deg=%.4g "
           "microsteps=%d current_ma=%d" %
@@ -802,9 +897,12 @@ def handle_command(line):
 
 
 def _dispatch_command(line):
+    global _last_activity_ms
     parts = line.strip().split()
     if not parts:
         return
+    _last_activity_ms = time.ticks_ms()  # any input counts, not just movement - see
+                                          # sleep_monitor_task/SLEEP_TIMEOUT_S
     cmd = parts[0].upper()
 
     if cmd == "STATUS":
@@ -813,7 +911,16 @@ def _dispatch_command(line):
     if cmd == "HELP":
         print(HELP_TEXT)
         return
+    if cmd == "SLEEP":
+        stop_all()
+        enter_sleep()
+        return
+    if cmd == "WAKE":
+        wake_up()
+        return
     if cmd == "START":
+        if _sleeping:
+            wake_up()
         try:
             duration = float(parts[1]) if len(parts) >= 2 else None
         except ValueError:
@@ -831,6 +938,9 @@ def _dispatch_command(line):
 
     sub = parts[1].upper()
     axis = {"X": state["x"], "Y": state["y"], "Z": state["z"], "A": state["a"]}[cmd]
+
+    if _sleeping and sub in ("START", "MOVE", "HOME"):
+        wake_up()
 
     if len(parts) == 2 and sub in _QUERYABLE_FIELDS and cmd in _QUERYABLE_FIELDS[sub]:
         field = _QUERYABLE_FIELDS[sub][cmd]
@@ -957,7 +1067,8 @@ async def main():
     print_status()
     print("ready - type HELP for commands")
     await asyncio.gather(x_task(), bounce_task(y_motor, "y"), bounce_task(z_motor, "z"),
-                          servo_task(), console_task(), position_autosave_task())
+                          servo_task(), console_task(), position_autosave_task(),
+                          sleep_monitor_task())
 
 
 if __name__ == "__main__":
