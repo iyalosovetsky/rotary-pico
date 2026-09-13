@@ -37,7 +37,7 @@ The project was inspired by the [Creality Raptor Turntable](https://www.youtube.
 
 ## 2. Command reference
 
-Commands are sent one per line over the console (REPL):
+Commands are sent one per line over the console (REPL). `MIN`/`MAX`/`SPEED`/`SGTHRS`/`LEAD`/`MICROSTEPS`/`CURRENT` with no value (e.g. `Y MIN`, not `Y MIN 0`) print that field's current value instead of setting it.
 
 | Command | Description |
 |---|---|
