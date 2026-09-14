@@ -6,6 +6,8 @@
 
 Control firmware for a DIY turntable rig for a Creality Raptor-style 3D scanner, built on a **BTT SKR Pico** board (RP2040, MicroPython).
 
+> See also [this grblHAL RP2040 fork](https://github.com/iyalosovetsky/RP2040_pico2w) — the same turntable/servo rig driven as a 4th axis + M101 servo command on top of grblHAL, instead of standalone MicroPython.
+
 - **X axis** — rotates the table (continuous rotation, speed control), plus a one-shot relative rotation to a given angle.
 - **Y/Z axes** — cyclic motion between a lower and upper limit, no physical endstops: `HOME` drives the axis until the TMC2209's StallGuard (sensorless homing) detects a genuine stall, then sets `MIN`/`MAX` to that position — a one-shot calibration, not something re-checked on every bounce. Also support a one-shot relative move to a given distance in millimeters, via a configurable lead screw pitch.
 - **ST3215 servo (A)** — tilts the scanner head (cyclic motion between a minimum and maximum angle), plus a one-shot relative move to a given angle using the servo's own position feedback.
